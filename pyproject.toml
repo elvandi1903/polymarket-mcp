@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 polymarket-mcp = "polymarket_mcp.server:main"
+polymarket-settlement-watcher = "polymarket_mcp.settlement_watcher:main"
 
 [tool.setuptools.packages.find]
 include = ["polymarket_mcp*"]

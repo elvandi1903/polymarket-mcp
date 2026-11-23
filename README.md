@@ -16,7 +16,7 @@ Proxy Wallet** (Magic / email) account and for connecting to **Hermes Agent**
 
 - Polymarket's old `@polymarket/clob-client` (TS) and `py-clob-client` (Python)
   are **archived and non-functional**. The supported path is the unified SDK.
-- The Python SDK (`polymarket-client==0.17.0`) uses `get_*` method names
+- The Python SDK (`polymarket-client==0.20.1`) uses `get_*` method names
   (`get_market`, `get_order_book`, …), *not* the `fetch_*` names shown in the
   TypeScript docs.
 - The SDK does **not** accept `signature_type` directly. It infers it by
@@ -32,11 +32,15 @@ cross-checked against the installed `polymarket-client` source.
 
 ---
 
-## Tools (52)
+## Tools (54)
 
 **Read (unauthenticated, no keys needed)**
 `search_markets`, `get_market`, `get_order_book`, `get_midpoint`, `get_price`,
 `get_last_trade_price`, `estimate_market_price`
+
+**BTC 5m settlement reads (public, no keys)**
+`get_btc5m_resolution`, `get_recent_btc5m_resolutions` — on-demand reads only;
+the autonomous poller is documented in the settlement section below.
 
 **Live book (WebSocket, no keys needed for public book)**
 `subscribe_book`, `unsubscribe_book`, `get_live_book`, `get_live_top_of_book`, `stream_status`,
@@ -68,8 +72,14 @@ below for durability, freshness, and rollover behavior.
 ```bash
 cd polymarket-mcp
 python3 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install -e .          # runtime only
+.venv/bin/pip install -e '.[dev]'   # runtime + pytest + ruff
+.venv/bin/python -m pytest -q       # 75 tests
 ```
+
+No hard-coded developer paths are required. The stdio test harness derives the
+project root from `__file__` and stubs HTTP in the child process, so the suite is
+path-independent and offline.
 
 ## Configure (secrets live only on your machine)
 
@@ -237,6 +247,122 @@ docs:
   the two-factor gate.
 - Heartbeat/GTD/GTD-cooldown mechanics are limit-order mechanics; they do
   not apply here.
+
+## Settlement: auto-polling mandiri (tanpa agent)
+
+### Masalah yang diperbaiki
+
+`get_btc5m_resolution(window_start, wait_seconds=...)` hanya melakukan polling
+**di dalam satu panggilan tool**. `wait_seconds` dibatasi maksimal 60 detik,
+jadi kalau settlement belum keluar atau agent tidak memanggil lagi, hasil
+tetap `pending`. Itu bukan mekanisme settlement yang otonom.
+
+Solusinya adalah proses terpisah:
+
+```bash
+polymarket-settlement-watcher \
+  --interval 15 \
+  --lookback 12 \
+  --output "$HOME/.config/polymarket-mcp/settlements.jsonl"
+```
+
+`polymarket-settlement-watcher` dipasang bersama paket ini (entry point di
+`pyproject.toml`). Dia **tidak** memakai MCP, tidak butuh agent, tidak butuh API
+key, dan tidak mengirim order. Dia hanya membaca Gamma + Data API v2 lewat
+`polymarket_mcp/resolution.py`.
+
+### Perilaku
+
+- Setiap `--interval` detik (default `15`) dia memeriksa `--lookback` window
+  5 menit terakhir (default `12` = 1 jam). Window di masa depan otomatis
+  dilewati sampai `window_end`.
+- State `pending`, `market_not_found`, atau `error` **di-polling ulang**; tidak
+  dianggap final. Hanya `resolved` yang ditulis.
+- Penulisan **idempoten**: saat start dia membaca file JSONL yang sudah ada dan
+  menandai `window_start` yang pernah ditulis, sehingga restart tidak
+  menghasilkan duplikat.
+- Suatu window hanya ditulis sekali, dengan `observed_at` (unix epoch) plus
+  payload lengkap dari `get_btc5m_resolution`.
+- `SIGINT`/`SIGTERM` dihentikan dengan anggun. `--once` menjalankan satu cycle
+  lalu keluar (cocok untuk smoke test / cron).
+
+### Format output (JSONL, satu baris per window resolved)
+
+```json
+{"observed_at":1795426500,"slug":"btc-updown-5m-1795426200","window_start":1795426200,"window_end":1795426500,"state":"resolved","winner":"Up","condition_id":"0x...","market_version":"v1","gamma_resolution_status":"resolved","resolution_source":"...","data_api_resolution":{"status":"resolved","payouts":[1000000,0]},"outcomes":[{"outcome":"Up","resolved":true,"final_price":1.0,"token_id":"...","outcome_index":0}]}
+```
+
+Field penting:
+
+| Field | Arti |
+|---|---|
+| `slug` | Event Gamma `btc-updown-5m-{epoch}` (pola ini **EMPIRIS**, bukan kontrak resmi docs). |
+| `window_start` / `window_end` | Batas jendela 300 detik (UTC epoch). |
+| `state` | `resolved`, `pending`, `window_not_ended`, `market_not_found`, atau `error`. |
+| `winner` | `Up`/`Down` bila token `resolved=true` dan `final_price >= 0.999` (toleransi EMPIRIS untuk float). |
+| `condition_id` | Dipakai untuk query `/v2/resolutions` dan `/v2/tokens`. |
+| `market_version` | `v1` untuk market CTF saat ini; tool tetap menangani cabang `v2`. |
+| `gamma_resolution_status` | `umaResolutionStatus` untuk v1, `resolutionStatus` untuk v2. |
+| `data_api_resolution` | Baris mentah `/v2/resolutions` (`status`, `payouts`, `resolved_at`, dll). |
+| `outcomes` | Tiap token: `outcome`, `resolved`, `final_price`, `token_id`, `outcome_index`. |
+
+### Sumber data resmi
+
+- Gamma: `GET /events/slug/{slug}` → https://docs.polymarket.com/api-spec/gamma-openapi.yaml
+- Data API v2: `GET /v2/resolutions?condition=...` → https://docs.polymarket.com/api-reference/data-api/overview
+- Data API v2: `GET /v2/tokens?condition=...` → https://docs.polymarket.com/market-data/public-analytics.md
+
+Semua response memakai envelope `data`; miss = `data: null`/`[]`, bukan error.
+Tidak ada Data API v1 yang dipakai.
+
+### Menjalankan sebagai service (disarankan)
+
+Server MCP tetap **on-demand via stdio** — dia menyala saat client memanggil,
+bukan daemon standby. Settlement watcher adalah **proses terpisah** yang memang
+harus hidup terus. Contoh systemd user unit:
+
+```ini
+[Unit]
+Description=Polymarket BTC5m settlement watcher
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/polymarket-mcp
+ExecStart=/absolute/path/to/polymarket-mcp/.venv/bin/polymarket-settlement-watcher --interval 15 --lookback 12
+Restart=always
+RestartSec=10
+StandardOutput=append:/absolute/path/to/polymarket-mcp/settlement-watcher.log
+StandardError=append:/absolute/path/to/polymarket-mcp/settlement-watcher.log
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now polymarket-settlement-watcher.service
+systemctl --user status polymarket-settlement-watcher.service
+journalctl --user -u polymarket-settlement-watcher.service -f
+```
+
+Smoke test tanpa daemon:
+
+```bash
+polymarket-settlement-watcher --once --lookback 3 --output /tmp/settlements.jsonl
+cat /tmp/settlements.jsonl
+```
+
+### Catatan operasional
+
+- --output bisa besar: satu baris per window resolved (±288/hari). Rotasi
+  dengan `logrotate` bila dipakai lama.
+- Jika `winner` null tetapi `state=resolved`, cek `outcomes` dan
+  `data_api_resolution.payouts` — itu berarti label outcome tidak `Up`/`Down`.
+- `error` biasanya sementara (429/503/jaringan); watcher akan mencoba lagi.
+  `-error` di stderr tidak menghentikan proses.
+- Clock harus sinkron (UTC). `window_start` harus kelipatan 300.
+- Ini pembacaan publik, bukan jaminan pembayaran. DYOR.
 
 ## Safety notes
 
