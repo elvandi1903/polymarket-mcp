@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-mcp"
+version = "0.1.0"
+description = "MCP server exposing Polymarket CLOB trading (read + order) via the official unified polymarket-client SDK. Read-only by default; live orders require an explicit two-factor gate."
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9,<4",
+    "mcp>=2,<3",
+    "polymarket-client==0.20.1",
+    "eth-account",
+]
+
+[project.scripts]
+polymarket-mcp = "polymarket_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["polymarket_mcp*"]
