@@ -8,8 +8,9 @@ punya PTB resmi per t_start. Hanya writer file; tidak menyentuh trading.
 import asyncio
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/home/trubs/polymarket-mcp")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from polymarket_mcp.config import Settings  # noqa: E402
 from polymarket_mcp.ptb import PtbFeed  # noqa: E402
 

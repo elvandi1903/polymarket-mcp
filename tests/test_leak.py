@@ -21,6 +21,60 @@ SWALLET = "SENTINEL_WALLET_9f8e"
 SENTINELS = (SKEY, SSEC, SPASS, SPK, SWALLET)
 
 
+def _stub_http_dir() -> str:
+    folder = tempfile.mkdtemp(prefix="poly-mcp-stub-")
+    stub = '''
+import httpx
+
+class _Response:
+    status_code = 200
+    text = "{}"
+    content = b"{}"
+    headers = {}
+    is_success = True
+    is_error = False
+
+    def json(self):
+        return {}
+
+    def raise_for_status(self):
+        return None
+
+class _Client:
+    def __init__(self, *args, **kwargs):
+        self.is_closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, *args, **kwargs):
+        return _Response()
+
+    async def post(self, *args, **kwargs):
+        return _Response()
+
+    async def request(self, *args, **kwargs):
+        return _Response()
+
+    async def close(self):
+        self.is_closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+httpx.AsyncClient = _Client
+httpx.Client = _Client
+'''
+    (Path(folder) / "sitecustomize.py").write_text(stub, encoding="utf-8")
+    return folder
+
+
 def _no_sentinel(obj_or_text, where: str) -> None:
     text = obj_or_text if isinstance(obj_or_text, str) else json.dumps(obj_or_text, default=str)
     for s in SENTINELS:
@@ -161,13 +215,16 @@ def test_credential_file_mode_0600_and_no_sentinel_in_name(tmp_path):
 def _run_stdio(env_extra: dict, calls: list[tuple[str, dict]]):
     env = dict(os.environ)
     env.update(env_extra)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [_stub_http_dir(), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     proc = subprocess.Popen(
         [sys.executable, "-m", "polymarket_mcp.server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=env,
-        cwd="/home/trubs/polymarket-mcp",
+        cwd=str(Path(__file__).resolve().parent.parent),
     )
 
     def send(obj):
@@ -237,7 +294,7 @@ def test_mcp_stdio_no_sentinel_on_all_tools():
 
 
 def test_env_example_has_no_values():
-    text = Path("/home/trubs/polymarket-mcp/.env.example").read_text()
+    text = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
