@@ -32,15 +32,18 @@ cross-checked against the installed `polymarket-client` source.
 
 ---
 
-## Tools (54)
+## Tools (55)
 
 **Read (unauthenticated, no keys needed)**
 `search_markets`, `get_market`, `get_order_book`, `get_midpoint`, `get_price`,
 `get_last_trade_price`, `estimate_market_price`
 
 **BTC 5m settlement reads (public, no keys)**
-`get_btc5m_resolution`, `get_recent_btc5m_resolutions` — on-demand reads only;
+`get_btc5m_snapshot`, `get_btc5m_resolution`, `get_recent_btc5m_resolutions` — on-demand reads only;
 the autonomous poller is documented in the settlement section below.
+`get_btc5m_snapshot` returns current/next slug, seconds to boundary, PTB, both
+live books, 5-share fill estimates and the last N Binance/Coinbase tape points in
+**one call** — use it for fast round entry instead of a multi-call chain.
 
 **Live book (WebSocket, no keys needed for public book)**
 `subscribe_book`, `unsubscribe_book`, `get_live_book`, `get_live_top_of_book`, `stream_status`,

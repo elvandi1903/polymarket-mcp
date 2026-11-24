@@ -134,8 +134,12 @@ class AssetStream:
     connected_at_ms: int = 0
     last_event_at_ms: int = 0        # local receipt time of last event
     last_payload_ts_ms: int = 0      # server ts of last APPLIED event
-    book: dict | None = None         # snapshot only
+    book: dict | None = None         # snapshot + applied price_change deltas
     book_source: str | None = None
+    # Local receipt of the event that produced the current book projection.
+    # last_event_at_ms is the last event of ANY type; a stream of deltas can
+    # keep that fresh while the book itself is old, so freshness must use this.
+    book_received_at_ms: int = 0
     best_bid_ask: dict | None = None
     last_trade: dict | None = None
     last_applied_ts_ms: int = 0
@@ -168,10 +172,79 @@ class AssetStream:
             "timestamp": getattr(payload, "timestamp", None),
         }
         self.book_source = source
+        self.book_received_at_ms = local_now_ms
+
+    def book_age_ms(self, now_ms: int | None = None) -> int:
+        """Age of the book projection, not of the last arbitrary event."""
+        now = now_ms if now_ms is not None else _now_ms()
+        if self.book is not None and self.book_received_at_ms:
+            return now - self.book_received_at_ms
+        return self.age_ms(now)
+
+    @staticmethod
+    def _level_map(rows: Any) -> dict:
+        levels: dict = {}
+        for row in rows or ():
+            try:
+                levels[decimal.Decimal(str(row["price"]))] = decimal.Decimal(
+                    str(row["size"])
+                )
+            except (KeyError, TypeError, decimal.InvalidOperation):
+                continue
+        return levels
+
+    def apply_price_changes(self, payload: Any, local_now_ms: int) -> None:
+        """Apply the venue's incremental book deltas (official contract).
+
+        ``price_change`` carries side/price/size per level; size 0 removes the
+        level. The wire ``book`` message is only a snapshot, so without this
+        the exposed depth stays frozen while the market moves.
+        """
+        if not isinstance(self.book, dict) or self.book_source != "clob_ws":
+            return
+        bids = self._level_map(self.book.get("bids"))
+        asks = self._level_map(self.book.get("asks"))
+        changes = getattr(payload, "price_changes", ()) or ()
+        for change in changes:
+            change_asset = getattr(change, "asset_id", None)
+            if change_asset is not None and str(change_asset) != self.asset_id:
+                continue
+            side = str(getattr(change, "side", "")).upper()
+            if side not in ("BUY", "SELL"):
+                continue
+            try:
+                price = decimal.Decimal(str(getattr(change, "price")))
+                size = decimal.Decimal(str(getattr(change, "size")))
+            except (TypeError, ValueError, decimal.InvalidOperation):
+                continue
+            if not decimal.Decimal(0) <= price <= 1 or size < 0:
+                continue
+            levels = bids if side == "BUY" else asks
+            if size == 0:
+                levels.pop(price, None)
+            else:
+                levels[price] = size
+        self.book["bids"] = [
+            {"price": str(price), "size": str(size)}
+            for price, size in sorted(bids.items())
+        ]
+        self.book["asks"] = [
+            {"price": str(price), "size": str(size)}
+            for price, size in sorted(asks.items(), reverse=True)
+        ]
+        timestamp = getattr(payload, "timestamp", None)
+        if timestamp is not None:
+            self.book["timestamp"] = timestamp
+        for change in changes:
+            if getattr(change, "hash", None):
+                self.book["hash"] = change.hash
+        # Even a no-op delta is proof the projected book still matches the
+        # venue, so the receipt advances with every applied delta.
+        self.book_received_at_ms = local_now_ms
 
     def availability(self, now_ms: int | None = None, cfg: dict | None = None) -> str:
         cfg = cfg or DEFAULT_CONFIG
-        age = self.age_ms(now_ms)
+        age = self.book_age_ms(now_ms)
         if age <= cfg["fresh_ms"]:
             return "live"
         if age < cfg["stale_ms"]:
@@ -180,7 +253,7 @@ class AssetStream:
 
     def is_stale(self, now_ms: int | None = None, cfg: dict | None = None) -> bool:
         cfg = cfg or DEFAULT_CONFIG
-        age = self.age_ms(now_ms)
+        age = self.book_age_ms(now_ms)
         return age > cfg["stale_ms"] or age > cfg["no_event_ms"]
 
     def invalidate(self) -> None:
@@ -209,6 +282,8 @@ class AssetStream:
             "availability": self.availability(now, cfg),
             "age_ms": self.age_ms(now),
             "age_seconds": round(self.age_ms(now) / 1000.0, 3),
+            "book_received_at_ms": self.book_received_at_ms or None,
+            "book_age_ms": self.book_age_ms(now),
             "connected_at_ms": self.connected_at_ms,
             "last_event_at_ms": self.last_event_at_ms,
             "last_payload_ts_ms": self.last_payload_ts_ms,
@@ -362,6 +437,8 @@ class LiveBookManager:
             st.last_drop_count = dropped
         if ev_type == "book":
             st.apply_book(payload, local_now, "clob_ws")
+        elif ev_type == "price_change":
+            st.apply_price_changes(payload, local_now)
         elif ev_type == "best_bid_ask":
             st.best_bid_ask = {
                 "best_bid": _dec_str(getattr(payload, "best_bid", None)),

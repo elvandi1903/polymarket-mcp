@@ -128,6 +128,62 @@ def test_best_bid_ask_are_last_entries():
     assert snap["best_ask"] == "0.35", "best ask must be last (lowest) ask"
 
 
+def _change(price, size, side, asset_id="A1", h="h"):
+    return NS(asset_id=asset_id, price=price, size=size, side=side, hash=h,
+              best_bid=None, best_ask=None)
+
+
+def test_price_change_deltas_update_live_book():
+    """price_change is the real-time update; book alone is only a snapshot."""
+    m, h, st = _manager_with()
+    st.apply_book(_book(0.60, 1000), local_now_ms=1000)
+    payload = NS(timestamp=1100, price_changes=(
+        _change(0.99, 0, "SELL", h="h1"),
+        _change(0.98, 50, "SELL", h="h2"),
+        _change(0.62, 30, "BUY", h="h3")))
+    m._on_event("A1", NS(type="price_change", payload=payload), h)
+    asks = {row["price"]: row["size"] for row in st.book["asks"]}
+    bids = {row["price"]: row["size"] for row in st.book["bids"]}
+    assert "0.99" not in asks
+    assert asks["0.98"] == "50"
+    assert bids["0.62"] == "30"
+    assert st.book["hash"] == "h3"
+    assert st.book_received_at_ms == st.last_event_at_ms
+    snap = st.snapshot_dict(now_ms=st.last_event_at_ms)
+    assert snap["best_bid"] == "0.62"
+    assert snap["best_ask"] == "0.98"
+
+
+def test_freshness_uses_book_receipt_not_event_traffic():
+    """Deltas kept last_event_at_ms fresh while the book itself was old."""
+    m, h, st = _manager_with()
+    st.apply_book(_book(0.60, 1000), local_now_ms=1000)
+    st.last_event_at_ms = 9000
+    snap = st.snapshot_dict(now_ms=9000)
+    assert snap["book_received_at_ms"] == 1000
+    assert snap["book_age_ms"] == 8000
+    assert snap["availability"] == "aging"
+    assert st.snapshot_dict(now_ms=20000)["availability"] == "stale"
+
+
+def test_live_top_of_book_reports_book_receipt_and_fresh_book_levels(monkeypatch):
+    from polymarket_mcp import live as livemod
+    from polymarket_mcp.server import get_live_top_of_book
+
+    m = LiveBookManager()
+    st = AssetStream(asset_id="A1")
+    st.apply_book(_book(0.60, 2000), local_now_ms=2000)
+    st.last_event_at_ms = 9000
+    st.best_bid_ask = {"best_bid": "0.10", "best_ask": "0.11",
+                       "spread": "0.01", "timestamp": 1000}
+    m._streams["A1"] = st
+    monkeypatch.setattr(livemod, "get_manager", lambda: m)
+    out = asyncio.run(get_live_top_of_book("A1"))
+    assert out["received_at_ms"] == 2000
+    assert out["bid"] == "0.6"
+    assert out["ask"] == "0.99"
+
+
 def test_midpoint_matches_book():
     """get_live_book midpoint should agree with REST midpoint logic."""
     from decimal import Decimal

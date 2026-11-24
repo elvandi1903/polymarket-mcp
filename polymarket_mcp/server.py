@@ -559,8 +559,28 @@ async def get_live_top_of_book(asset_id: str) -> dict:
     snap = st.snapshot_dict()
     book = snap.get("book_snapshot") or {}
     bbo = snap.get("best_bid_ask") or {}
-    bid, ask = bbo.get("best_bid"), bbo.get("best_ask")
-    timestamp = bbo.get("timestamp")
+    def epoch_ms(value):
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            return int(value.timestamp() * 1000)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    return int(parsed.timestamp() * 1000)
+            except ValueError:
+                pass
+        return None
+
+    # The book projection is updated by price_change deltas; a BBO event is
+    # only authoritative when it is at least as new as that projection.
+    book_timestamp_ms = epoch_ms(book.get("timestamp"))
+    bbo_timestamp_ms = epoch_ms(bbo.get("timestamp"))
+    use_bbo = (book_timestamp_ms is not None and bbo_timestamp_ms is not None
+               and bbo_timestamp_ms >= book_timestamp_ms)
+    bid, ask = (bbo.get("best_bid"), bbo.get("best_ask")) if use_bbo else (None, None)
+    timestamp = bbo.get("timestamp") if use_bbo else None
     if bid is None or ask is None:
         bids, asks = book.get("bids") or [], book.get("asks") or []
         try:
@@ -571,20 +591,9 @@ async def get_live_top_of_book(asset_id: str) -> dict:
         except (KeyError, TypeError, decimal.InvalidOperation, ValueError):
             bid = ask = None
         timestamp = book.get("timestamp")
-    def epoch_ms(value):
-        if isinstance(value, datetime) and value.tzinfo is not None:
-            return int(value.timestamp() * 1000)
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                if parsed.tzinfo is not None:
-                    return int(parsed.timestamp() * 1000)
-            except ValueError:
-                pass
-        return None
 
     timestamp_ms = epoch_ms(timestamp)
-    hash_timestamp_ms = epoch_ms(book.get("timestamp"))
+    hash_timestamp_ms = book_timestamp_ms
     if not book:
         bid = ask = None
         timestamp_ms = None
@@ -592,8 +601,8 @@ async def get_live_top_of_book(asset_id: str) -> dict:
         "asset_id": asset_id,
         "slug": snap.get("slug"),
         "availability": snap.get("availability"),
-        "age_ms": snap.get("age_ms"),
-        "received_at_ms": snap.get("last_event_at_ms"),
+        "age_ms": snap.get("book_age_ms", snap.get("age_ms")),
+        "received_at_ms": snap.get("book_received_at_ms"),
         "timestamp_ms": timestamp_ms,
         "bid": bid,
         "ask": ask,
@@ -1203,6 +1212,73 @@ async def user_stream_events(limit: int = 50) -> dict:
     from polymarket_mcp.round_streams import user_stream_events as _events
 
     return await _events(limit)
+
+
+@mcp.tool()
+async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
+    """One-call BTC 5m snapshot: round, PTB, both live books, tape and 5-sh fills.
+
+    Read-only. Reduces an agent's multi-call chain to a single MCP call so the
+    verdict is formed before the book is swept. Missing values stay explicit.
+    """
+    import time
+
+    from polymarket_mcp.round_streams import _round_boundaries
+
+    limit = max(1, min(int(tape_limit), 50))
+    info = await _round_boundaries()
+    start = int(info["current_window_start"])
+    result: dict[str, Any] = {
+        **info,
+        "as_of": int(time.time()),
+        "assets": {},
+        "books": {},
+        "fills": {},
+        "tape": {},
+        "errors": [],
+    }
+    market = None
+    pub = clientmod.build_public_client()
+    try:
+        market = await pub.get_market(slug=info["current_slug"])
+    except Exception as exc:
+        result["errors"].append(f"market:{type(exc).__name__}")
+    finally:
+        await pub.close()
+    if market is not None:
+        for side in ("UP", "DOWN"):
+            try:
+                asset_id, how = _resolve_asset_id(market, side)
+                result["assets"][side] = {"asset_id": asset_id, "via": how}
+            except Exception as exc:
+                result["errors"].append(f"{side}:{type(exc).__name__}")
+    try:
+        result["ptb"] = await get_ptb(start)
+    except Exception as exc:
+        result["errors"].append(f"ptb:{type(exc).__name__}")
+        result["ptb"] = {"t_start": start, "status": "error"}
+    for side, data in result["assets"].items():
+        asset_id = data["asset_id"]
+        try:
+            result["books"][side] = await get_live_top_of_book(asset_id)
+        except Exception as exc:
+            result["errors"].append(f"book.{side}:{type(exc).__name__}")
+            result["books"][side] = {"asset_id": asset_id, "status": "error"}
+        try:
+            result["fills"][side] = await estimate_market_price(
+                asset_id, "BUY", shares="5",
+            )
+        except Exception as exc:
+            result["errors"].append(f"fill.{side}:{type(exc).__name__}")
+            result["fills"][side] = {"asset_id": asset_id, "estimated_price": None}
+    for source in ("binance", "coinbase"):
+        try:
+            payload = await market_data_last_points(source, limit)
+            result["tape"][source] = payload.get("points", [])
+        except Exception as exc:
+            result["errors"].append(f"tape.{source}:{type(exc).__name__}")
+            result["tape"][source] = []
+    return result
 
 
 @mcp.tool()
