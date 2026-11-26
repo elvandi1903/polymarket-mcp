@@ -44,6 +44,7 @@ def test_missing_wallet_raises():
 def test_relayer_fields_parsed():
     import os
     from unittest.mock import patch
+
     from polymarket_mcp.config import Settings
     env = {
         "RELAYER_API_KEY": "fake-relayer-key",

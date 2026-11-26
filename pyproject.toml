@@ -26,3 +26,15 @@ polymarket-settlement-watcher = "polymarket_mcp.settlement_watcher:main"
 
 [tool.setuptools.packages.find]
 include = ["polymarket_mcp*"]
+
+[tool.ruff.lint.per-file-ignores]
+"polymarket_mcp/credentials.py" = ["BLE001"]
+"polymarket_mcp/live.py" = ["BLE001", "S110"]
+"polymarket_mcp/market_data.py" = ["BLE001"]
+"polymarket_mcp/orders.py" = ["BLE001"]
+"polymarket_mcp/ptb.py" = ["BLE001"]
+"polymarket_mcp/round_streams.py" = ["BLE001"]
+"polymarket_mcp/server.py" = ["BLE001", "S110"]
+"polymarket_mcp/settlement_watcher.py" = ["BLE001"]
+"tests/test_leak.py" = ["BLE001"]
+"trade_check.py" = ["BLE001", "S110"]

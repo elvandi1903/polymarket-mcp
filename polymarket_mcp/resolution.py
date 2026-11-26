@@ -20,7 +20,7 @@ try:
     from mcp.server.mcpserver import MCPServer  # type: ignore
 except ImportError:
     # RESMI: installed mcp 1.x exposes FastMCP; 2.x exposes MCPServer.
-    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore
+    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore  # noqa: F401
 
 # RESMI: https://docs.polymarket.com/api-reference/data-api/overview
 DATA_API_BASE = "https://data-api.polymarket.com/v2"
@@ -159,7 +159,7 @@ async def get_btc5m_resolution(window_start: int | None = None,
                 "message": "wait_seconds must be an integer"}
     wait_seconds = max(0, min(60, wait_seconds))
     try:
-        start, end, _slug = window_bounds(window_start)
+        start, _end, _slug = window_bounds(window_start)
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
             started = time.monotonic()
             result = await _fetch_one(client, start)

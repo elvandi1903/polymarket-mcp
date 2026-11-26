@@ -137,7 +137,6 @@ async def derive_credentials(settings: Settings) -> dict:
     dance internally — we do not reimplement it.
     """
     from polymarket import AsyncSecureClient
-    from polymarket.models.clob.api_key import ApiKeyCreds
 
     try:
         classification = clientmod.assert_proxy_wallet(settings)
@@ -185,7 +184,7 @@ async def _validate_via_client(settings: Settings, creds) -> bool:
     """Real L2 validation: GET /auth/api-keys signed with the saved creds."""
     from polymarket import AsyncSecureClient
 
-    pre = clientmod.assert_proxy_wallet(settings)
+    clientmod.assert_proxy_wallet(settings)
     client = None
     try:
         client = await AsyncSecureClient.create(
@@ -312,13 +311,14 @@ async def revoke_credentials(settings: Settings, creds, *, rotate: bool = False,
 
 async def _derive_only(settings: Settings, nonce: int):
     """Derive credentials only (no client hand-off) via the SDK crypto path."""
-    from polymarket._internal.l1_auth import sign_api_key_auth
+    import time as _time
+
+    from eth_account import Account
     from polymarket._internal.actions import auth as _auth_actions
+    from polymarket._internal.environment import get_environment_config
+    from polymarket._internal.l1_auth import sign_api_key_auth
     from polymarket.clients._transport import AsyncTransport
     from polymarket.environments import PRODUCTION
-    from polymarket._internal.environment import get_environment_config
-    from eth_account import Account
-    import time as _time
 
     signer = Account.from_key(settings.private_key)
     config = get_environment_config(PRODUCTION)

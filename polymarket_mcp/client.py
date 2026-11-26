@@ -10,16 +10,11 @@ before any authenticated call.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from polymarket import AsyncPublicClient, AsyncSecureClient
 from polymarket.environments import PRODUCTION
 from polymarket.models.clob.api_key import ApiKeyCreds
 
 from .config import Settings
-
-if TYPE_CHECKING:
-    pass
 
 
 class PreflightError(RuntimeError):

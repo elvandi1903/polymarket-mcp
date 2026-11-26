@@ -33,7 +33,6 @@ assumed:
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 from typing import Any
 
 from polymarket.errors import RequestRejectedError
@@ -108,7 +107,7 @@ def preflight_for_order(
     except Exception as exc:
         issues.append(f"Preflight classification failed: {type(exc).__name__}: {exc}")
     # 2. Live gate state (info only; the confirm flag is checked per-call)
-    gate = safety.gate_result(settings, confirm=False)
+    safety.gate_result(settings, confirm=False)
     if not settings.has_private_key:
         issues.append("POLY_PRIVATE_KEY not set")
     if not settings.wallet:

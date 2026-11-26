@@ -57,7 +57,7 @@ def _env(name: str, default: str = "") -> str:
 def _decimal_or_zero(raw: str, name: str) -> Decimal:
     raw = raw.strip()
     if not raw:
-        return Decimal("0")
+        return Decimal(0)
     try:
         return Decimal(raw)
     except (InvalidOperation, ValueError) as exc:
@@ -75,12 +75,12 @@ class Settings:
     relayer_api_key: str = ""
     relayer_address: str = ""
     allow_live: bool = False              # server-side live switch
-    max_notional: Decimal = Decimal("0")  # 0 = unset
+    max_notional: Decimal = Decimal(0)  # 0 = unset
     max_open_orders: int = 0              # 0 = unset
     nonce: int = 0
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         try:
             nonce = int(_env("POLY_NONCE", "0") or "0")
         except ValueError as exc:

@@ -45,7 +45,7 @@ def _manager_with(handle_dropped: int = 0):
 
 
 def test_book_applies():
-    m, h, st = _manager_with()
+    _m, _h, st = _manager_with()
     st.apply_book(_book(0.60, 1000), local_now_ms=1000)
     assert st.book and st.book["bids"][0]["price"] == "0.6"
 
@@ -156,7 +156,7 @@ def test_price_change_deltas_update_live_book():
 
 def test_freshness_uses_book_receipt_not_event_traffic():
     """Deltas kept last_event_at_ms fresh while the book itself was old."""
-    m, h, st = _manager_with()
+    _m, _h, st = _manager_with()
     st.apply_book(_book(0.60, 1000), local_now_ms=1000)
     st.last_event_at_ms = 9000
     snap = st.snapshot_dict(now_ms=9000)

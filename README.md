@@ -42,8 +42,12 @@ cross-checked against the installed `polymarket-client` source.
 `get_btc5m_snapshot`, `get_btc5m_resolution`, `get_recent_btc5m_resolutions` — on-demand reads only;
 the autonomous poller is documented in the settlement section below.
 `get_btc5m_snapshot` returns current/next slug, seconds to boundary, PTB, both
-live books, 5-share fill estimates and the last N Binance/Coinbase tape points in
-**one call** — use it for fast round entry instead of a multi-call chain.
+live books, market constraints, 5-share fill estimates, and the last N
+Binance/Coinbase tape points in **one call**. BUY estimates preserve the
+5-share target by converting it to notional from the current best ask and
+rounding up to the market tick; if no ask is available, that side reports
+`fill.<SIDE>:NoAsk` without discarding the rest of the snapshot. Tape points
+include trade size and the feed-reported side when available.
 
 **Live book (WebSocket, no keys needed for public book)**
 `subscribe_book`, `unsubscribe_book`, `get_live_book`, `get_live_top_of_book`, `stream_status`,
@@ -77,7 +81,8 @@ cd polymarket-mcp
 python3 -m venv .venv
 .venv/bin/pip install -e .          # runtime only
 .venv/bin/pip install -e '.[dev]'   # runtime + pytest + ruff
-.venv/bin/python -m pytest -q       # 75 tests
+.venv/bin/ruff check .              # lint
+.venv/bin/python -m pytest -q       # 81 tests
 ```
 
 No hard-coded developer paths are required. The stdio test harness derives the
@@ -143,7 +148,8 @@ constraints, resolved `asset_id`, tick/min-size) and sends nothing.
 ## Testing (offline, no funds)
 
 ```bash
-.venv/bin/python -m pytest tests -q   # 36 passed
+.venv/bin/ruff check .
+.venv/bin/python -m pytest -q   # 81 passed
 ```
 
 The suite covers the Proxy preflight (including the misclassification trap),

@@ -3,11 +3,12 @@ import asyncio
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
+from polymarket_mcp.config import Settings
 from polymarket_mcp.ptb import (
     PtbFeed,
     PtbPoint,
@@ -19,7 +20,6 @@ from polymarket_mcp.ptb import (
     parse_twap_payload,
     window_slug,
 )
-from polymarket_mcp.config import Settings
 
 
 def test_window_math():
@@ -40,12 +40,12 @@ def test_parse_twap_payload_variations():
 
 
 def test_canonical_ptb_point_first_at_or_after():
-    t0 = datetime(2026, 11, 7, 8, 35, tzinfo=timezone.utc)
+    t0 = datetime(2026, 11, 7, 8, 35, tzinfo=UTC)
     pts = [
-        PtbPoint(Decimal("100"), t0, "2026-11-07T08:35:00Z"),
-        PtbPoint(Decimal("101"), t0, "2026-11-07T08:35:01Z"),
+        PtbPoint(Decimal(100), t0, "2026-11-07T08:35:00Z"),
+        PtbPoint(Decimal(101), t0, "2026-11-07T08:35:01Z"),
     ]
-    assert canonical_ptb_point(pts, int(t0.timestamp())).value == Decimal("100")
+    assert canonical_ptb_point(pts, int(t0.timestamp())).value == Decimal(100)
     assert canonical_ptb_point([], int(t0.timestamp())) is None
 
 
@@ -54,7 +54,7 @@ def test_store_roundtrip_and_jsonl(tmp_path):
     store = PtbStore(path)
     rec = PtbRecord(
         t_start=1794029100, slug="btc-updown-5m-1794029100", ptb=Decimal("75891.4170031904"),
-        point_timestamp=datetime(2026, 11, 7, 5, 25, tzinfo=timezone.utc),
+        point_timestamp=datetime(2026, 11, 7, 5, 25, tzinfo=UTC),
         source="polybolt:price.crypto.twap", received_at=1794029101.0,
         reconstructed_from_snapshot=True, status="captured",
         close_ptb=Decimal("75900.5"), close_ts="2026-11-07T05:29:59+00:00",
@@ -78,7 +78,6 @@ def test_handle_text_snapshot_vs_update():
     offset-0 case. A snapshot point 312s after window start must be ignored.
     """
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
-    import tempfile
 
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb.jsonl"))
 
@@ -112,7 +111,6 @@ def _twap_msg(ts_ms, value, *, snapshot=False):
 
 def test_close_point_captured_and_settled():
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
-    import tempfile
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb-close-gap.jsonl"))
 
     async def go():
@@ -123,8 +121,8 @@ def test_close_point_captured_and_settled():
 
     asyncio.new_event_loop().run_until_complete(go())
     rec = feed.store.get(1794029100)
-    assert rec.ptb == Decimal("61000")
-    assert rec.close_ptb == Decimal("61100")
+    assert rec.ptb == Decimal(61000)
+    assert rec.close_ptb == Decimal(61100)
     assert rec.close_ts is not None
     from polymarket_mcp.ptb import settlement_outcome
     assert settlement_outcome(rec) == "Up"
@@ -132,7 +130,6 @@ def test_close_point_captured_and_settled():
 
 def test_boundary_point_belongs_to_next_window_and_down_outcome():
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
-    import tempfile
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb-boundary.jsonl"))
 
     async def go():
@@ -144,8 +141,8 @@ def test_boundary_point_belongs_to_next_window_and_down_outcome():
     asyncio.new_event_loop().run_until_complete(go())
     first = feed.store.get(1794029100)
     second = feed.store.get(1794029400)
-    assert first.close_ptb == Decimal("60990")
-    assert second.ptb == Decimal("62000")
+    assert first.close_ptb == Decimal(60990)
+    assert second.ptb == Decimal(62000)
     assert second.close_ptb is None
     from polymarket_mcp.ptb import settlement_outcome
     assert settlement_outcome(first) == "Down"
@@ -155,14 +152,15 @@ def test_boundary_point_belongs_to_next_window_and_down_outcome():
 def test_get_ptb_tool_exposes_close_and_outcome():
     from types import SimpleNamespace
     from unittest.mock import patch
+
     from polymarket_mcp.server import get_ptb
 
     rec = PtbRecord(
-        t_start=1794029100, slug=window_slug(1794029100), ptb=Decimal("61420"),
-        point_timestamp=datetime(2026, 11, 7, 5, 25, tzinfo=timezone.utc),
+        t_start=1794029100, slug=window_slug(1794029100), ptb=Decimal(61420),
+        point_timestamp=datetime(2026, 11, 7, 5, 25, tzinfo=UTC),
         source="test", received_at=1794029101.0,
         reconstructed_from_snapshot=False, status="captured",
-        close_ptb=Decimal("61512"), close_ts="2026-11-07T05:29:59+00:00",
+        close_ptb=Decimal(61512), close_ts="2026-11-07T05:29:59+00:00",
     )
     feed = SimpleNamespace(store=SimpleNamespace(get=lambda t: rec))
     with patch("polymarket_mcp.ptb.get_feed", lambda: feed):
@@ -175,7 +173,6 @@ def test_get_ptb_tool_exposes_close_and_outcome():
 def test_snapshot_far_point_is_unavailable():
     """A snapshot point 312s after window start must NOT be captured."""
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
-    import tempfile
 
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb2.jsonl"))
 
@@ -196,7 +193,6 @@ def test_snapshot_far_point_is_unavailable():
 def test_live_update_captures_exact_boundary():
     """Live (non-snapshot) point exactly at t_start is captured."""
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
-    import tempfile
 
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb3.jsonl"))
 

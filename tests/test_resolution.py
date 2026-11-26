@@ -1,7 +1,6 @@
 """Resolution tools: all HTTP mocked, no secrets, no disk writes."""
 import asyncio
 import time
-from unittest.mock import patch
 
 from polymarket_mcp import resolution
 from polymarket_mcp.config import Settings  # noqa: F401  (compat check)

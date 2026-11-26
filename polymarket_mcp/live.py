@@ -34,15 +34,13 @@ import decimal
 import logging
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from polymarket.streams import MarketSpec
 
 from . import client as clientmod
-from .config import Settings
 from .server import _resolve_asset_id  # reuse the one canonical resolver
 
 log = logging.getLogger("polymarket_mcp.live")
@@ -104,7 +102,7 @@ def _event_ts_ms(payload: Any) -> int | None:
     if ts is None:
         return None
     if isinstance(ts, datetime):
-        z = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        z = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
         return int(z.timestamp() * 1000)
     try:
         return int(ts)  # epoch ms
@@ -213,8 +211,8 @@ class AssetStream:
             if side not in ("BUY", "SELL"):
                 continue
             try:
-                price = decimal.Decimal(str(getattr(change, "price")))
-                size = decimal.Decimal(str(getattr(change, "size")))
+                price = decimal.Decimal(str(change.price))
+                size = decimal.Decimal(str(change.size))
             except (TypeError, ValueError, decimal.InvalidOperation):
                 continue
             if not decimal.Decimal(0) <= price <= 1 or size < 0:
@@ -458,20 +456,17 @@ class LiveBookManager:
         self._watchdog_task = asyncio.create_task(self._watchdog(), name="live-watchdog")
 
     async def _watchdog(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(float(self.cfg["watchdog_tick_s"]))
-                now = _now_ms()
-                for st in list(self._streams.values()):
-                    if st.is_stale(now, self.cfg):
-                        st.invalidate()
-                        if time.time() - self._last_fallback_at >= float(
-                            self.cfg["fallback_cooldown_s"]
-                        ):
-                            self._last_fallback_at = time.time()
-                            await self._rest_fallback(st)
-        except asyncio.CancelledError:
-            raise
+        while True:
+            await asyncio.sleep(float(self.cfg["watchdog_tick_s"]))
+            now = _now_ms()
+            for st in list(self._streams.values()):
+                if st.is_stale(now, self.cfg):
+                    st.invalidate()
+                    if time.time() - self._last_fallback_at >= float(
+                        self.cfg["fallback_cooldown_s"]
+                    ):
+                        self._last_fallback_at = time.time()
+                        await self._rest_fallback(st)
 
     async def _rest_fallback(self, st: AssetStream) -> None:
         """Refresh one asset from REST when WS is stale. Sets availability live."""

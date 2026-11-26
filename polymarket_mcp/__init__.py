@@ -10,5 +10,5 @@ Design notes (do not "fix" without source):
   dry-run, so a stray agent/tool call cannot move real funds.
 """
 
-__all__ = ["config", "client", "safety", "server"]
+__all__ = ["client", "config", "safety", "server"]
 __version__ = "0.1.0"

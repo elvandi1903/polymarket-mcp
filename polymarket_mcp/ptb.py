@@ -65,15 +65,14 @@ MCP integration design:
 from __future__ import annotations
 
 import asyncio
-import decimal
 import json
 import logging
 import os
 import random
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -148,9 +147,9 @@ def parse_rfc3339(s: str) -> datetime:
     if s.isdigit():
         ms = int(s)
         if ms > 10_000_000_000:  # milliseconds
-            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
-        return datetime.fromtimestamp(float(ms), tz=timezone.utc)
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+        return datetime.fromtimestamp(float(ms), tz=UTC)
+    return datetime.fromisoformat(s)
 
 
 def parse_twap_payload(payload: dict) -> list[dict]:
@@ -187,7 +186,7 @@ def canonical_ptb_point(points: list[PtbPoint], t_start: int) -> PtbPoint | None
     """
     if not points:
         return None
-    t_start_dt = datetime.fromtimestamp(t_start, tz=timezone.utc)
+    t_start_dt = datetime.fromtimestamp(t_start, tz=UTC)
     for p in points:
         if p.timestamp >= t_start_dt:
             return p
@@ -349,7 +348,7 @@ class PtbFeed:
         return cand
 
     async def run(self) -> None:
-        from aiohttp import ClientSession, WSMsgType, ClientWebSocketResponse
+        from aiohttp import ClientSession, WSMsgType
         from aiohttp import WSServerHandshakeError as WSHandshakeError
 
         self._running = True

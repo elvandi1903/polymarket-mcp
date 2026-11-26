@@ -5,7 +5,6 @@ log, exception, or repr, the test fails. This is the "no leak" gate for this
 repo: it covers the MCP tool surface (success AND error paths) and the
 direct Python call paths.
 """
-import asyncio
 import json
 import os
 import subprocess
@@ -96,8 +95,9 @@ def _env_with_sentinels():
 
 
 def test_save_credentials_returns_no_secret():
-    import polymarket_mcp.credentials as C
     from polymarket.models.clob.api_key import ApiKeyCreds
+
+    import polymarket_mcp.credentials as C
 
     p = Path(tempfile.mkdtemp()) / "c.json"
     r = C.save_credentials(ApiKeyCreds(apiKey=SKEY, secret=SSEC, passphrase=SPASS), path=p)
@@ -107,8 +107,9 @@ def test_save_credentials_returns_no_secret():
 
 
 def test_load_credentials_repr_redacted():
-    import polymarket_mcp.credentials as C
     from polymarket.models.clob.api_key import ApiKeyCreds
+
+    import polymarket_mcp.credentials as C
 
     p = Path(tempfile.mkdtemp()) / "c.json"
     C.save_credentials(ApiKeyCreds(apiKey=SKEY, secret=SSEC, passphrase=SPASS), path=p)
@@ -118,8 +119,9 @@ def test_load_credentials_repr_redacted():
 
 
 def test_saved_summary_no_secret():
-    import polymarket_mcp.credentials as C
     from polymarket.models.clob.api_key import ApiKeyCreds
+
+    import polymarket_mcp.credentials as C
 
     p = Path(tempfile.mkdtemp()) / "c.json"
     C.save_credentials(ApiKeyCreds(apiKey=SKEY, secret=SSEC, passphrase=SPASS), path=p)
@@ -199,8 +201,9 @@ def test_config_reads_dotenv_when_env_missing():
 
 
 def test_credential_file_mode_0600_and_no_sentinel_in_name(tmp_path):
-    import polymarket_mcp.credentials as C
     from polymarket.models.clob.api_key import ApiKeyCreds
+
+    import polymarket_mcp.credentials as C
 
     cred_dir = tmp_path / "sub"
     p = cred_dir / "mycreds.json"

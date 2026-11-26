@@ -96,7 +96,7 @@ class SettlementWatcher:
                 await asyncio.wait_for(
                     self.stop_event.wait(), timeout=self.interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
         print("settlement watcher stopped", flush=True)
         return 0

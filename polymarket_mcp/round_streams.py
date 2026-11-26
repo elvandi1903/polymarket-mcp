@@ -17,7 +17,13 @@ from polymarket.streams import UserSpec
 
 from . import client as clientmod
 from .config import Settings
-from .live import AssetStream, RolloverWatcher, boundaries, get_manager, get_shared_client
+from .live import (
+    AssetStream,
+    RolloverWatcher,
+    boundaries,
+    get_manager,
+    get_shared_client,
+)
 
 _USER_EVENTS_MAX = 200
 _USER_EVENTS: deque[Any] = deque(maxlen=_USER_EVENTS_MAX)

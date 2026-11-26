@@ -19,7 +19,7 @@ class ValidationError(RuntimeError):
     pass
 
 
-def to_decimal(value: str | int | float, field: str) -> Decimal:
+def to_decimal(value: str | float, field: str) -> Decimal:
     try:
         d = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

@@ -44,12 +44,10 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
-
-from .config import Settings
 
 # ---------------------------------------------------------------------------
 # Endpoints (verified from the live APIs; advanced-trade-ws requires auth)
@@ -68,7 +66,7 @@ def _now_ms() -> int:
 def _parse_iso(s: str) -> int | None:
     """ISO-8601 / RFC3339 string -> epoch ms."""
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s)
         return int(dt.timestamp() * 1000)
     except (ValueError, OverflowError):
         return None
@@ -87,6 +85,8 @@ class SpotPoint:
     is_gap: bool = False
     is_outlier: bool = False
     note: str = ""
+    size: Decimal | None = None
+    taker_side: str | None = None  # "buy" | "sell" (taker aggressor)
 
     def as_dict(self) -> dict:
         return {
@@ -101,6 +101,8 @@ class SpotPoint:
             "is_outlier": self.is_outlier,
             "sequence": self.sequence,
             "note": self.note,
+            "size": str(self.size) if self.size is not None else None,
+            "taker_side": self.taker_side,
         }
 
 
@@ -133,11 +135,14 @@ class FeedState:
             point.is_gap = True
             self.gaps += 1
         # sequence regression (Coinbase ticker sequence_num)
-        if point.sequence is not None and self.last_sequence is not None:
-            if point.sequence < self.last_sequence:
-                point.is_gap = True
-                self.gaps += 1
-                point.note = f"seq regression {self.last_sequence}->{point.sequence}"
+        if (
+            point.sequence is not None
+            and self.last_sequence is not None
+            and point.sequence < self.last_sequence
+        ):
+            point.is_gap = True
+            self.gaps += 1
+            point.note = f"seq regression {self.last_sequence}->{point.sequence}"
         # outlier: >1% move vs previous good price, or non-positive
         if point.price <= 0:
             point.is_outlier = True
@@ -221,12 +226,17 @@ class LiveMarketDataEngine:
         if d.get("e") != "trade":
             return None
         try:
+            size = Decimal(str(d["q"])) if d.get("q") is not None else None
+            maker = d.get("m")
+            taker_side = ("sell" if maker else "buy") if isinstance(maker, bool) else None
             return SpotPoint(
                 source="binance",
                 symbol=(symbol or str(d["s"])).upper(),
                 price=Decimal(str(d["p"])),
                 timestamp_ms=int(d["T"]),
                 sequence=int(d.get("u") or 0) or None,
+                size=size,
+                taker_side=taker_side,
             )
         except (KeyError, decimal.InvalidOperation, ValueError):
             return None
@@ -253,12 +263,16 @@ class LiveMarketDataEngine:
                 return None
         seq = d.get("sequence") if d.get("sequence") is not None else d.get("sequence_num")
         try:
+            size = Decimal(str(d["last_size"])) if d.get("last_size") is not None else None
+            side = str(d.get("side") or "").strip().lower() or None
             return SpotPoint(
                 source="coinbase",
                 symbol=product or str(symbol).upper(),
                 price=Decimal(str(d["price"])),
                 timestamp_ms=ts,
                 sequence=int(seq) if seq is not None else None,
+                size=size,
+                taker_side=side if side in ("buy", "sell") else None,
             )
         except (KeyError, decimal.InvalidOperation, ValueError):
             return None

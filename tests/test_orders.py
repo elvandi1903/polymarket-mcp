@@ -43,7 +43,7 @@ def test_failure_matrix_covers_all_codes():
     expected = {"not_enough_balance", "INVALID", "unknown", "unmatched",
                 "delayed", "rate_limit", "service_unavailable"}
     assert expected <= set(orders.FAILURE_MATRIX)
-    for k, v in orders.FAILURE_MATRIX.items():
+    for v in orders.FAILURE_MATRIX.values():
         assert "meaning" in v and "action" in v and "status_code" in v
 
 

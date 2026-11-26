@@ -423,7 +423,7 @@ async def place_market_order(
         raise safety.ValidationError("BUY market order requires amount (USD notional)")
     if s == "SELL" and shr is None:
         raise safety.ValidationError("SELL market order requires shares")
-    cap = amt if amt is not None else (mspend if mspend is not None else Decimal("0"))
+    cap = amt if amt is not None else (mspend if mspend is not None else Decimal(0))
     safety.check_notional(st, cap)
     gate = safety.gate_result(st, confirm)
     _mkt, asset_id, how, constraints = await _resolve_market(market, o)
@@ -550,6 +550,7 @@ async def get_live_book(asset_id: str) -> dict:
 async def get_live_top_of_book(asset_id: str) -> dict:
     """Return a compact, timestamped top-of-book snapshot for an asset."""
     from datetime import datetime
+
     from polymarket_mcp.live import get_manager
 
     manager = get_manager()
@@ -569,7 +570,7 @@ async def get_live_top_of_book(asset_id: str) -> dict:
             return int(value)
         if isinstance(value, str):
             try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(value)
                 if parsed.tzinfo is not None:
                     return int(parsed.timestamp() * 1000)
             except ValueError:
@@ -659,7 +660,7 @@ async def watch_asset(slug: str, outcome: str = "UP") -> dict:
     Useful right before a BTC 5m boundary: it resolves the asset_id from the
     slug, subscribes (or reuses) and returns a live snapshot.
     """
-    from polymarket_mcp.live import boundaries, get_manager
+    from polymarket_mcp.live import get_manager
 
     m = get_manager()
     pub = clientmod.build_public_client()
@@ -671,7 +672,6 @@ async def watch_asset(slug: str, outcome: str = "UP") -> dict:
     st = await m.subscribe(asset_id, slug=slug)
     snap = st.snapshot_dict()
     if snap.get("book_snapshot") is None:
-        import time
 
         await m._rest_fallback(st)
         snap = st.snapshot_dict()
@@ -704,7 +704,6 @@ async def validate_api_credentials() -> dict:
     authentication). Returns active/invalid; 401 = invalid, other errors
     surface their endpoint status.
     """
-    from polymarket.models.clob.api_key import ApiKeyCreds
 
     import polymarket_mcp.credentials as creds
     st = _settings()
@@ -745,8 +744,9 @@ async def save_api_credentials(api_key: str, secret: str, passphrase: str) -> di
     The values are written only to disk; the response contains no secret.
     Prefer populating POLY_API_* via env for ephemeral runs.
     """
-    import polymarket_mcp.credentials as creds
     from polymarket.models.clob.api_key import ApiKeyCreds
+
+    import polymarket_mcp.credentials as creds
 
     return creds.save_credentials(ApiKeyCreds(apiKey=api_key, secret=secret, passphrase=passphrase))
 
@@ -971,15 +971,12 @@ async def start_ptb_feed() -> dict:
     # a message, surface the real cause instead of lying about "started".
     import asyncio
     import time
-    try:
-        for _ in range(10):
-            if feed._last_msg_at:
-                break
-            if feed._task is None or feed._task.done():
-                break
-            await asyncio.sleep(0.25)
-    except asyncio.CancelledError:
-        raise
+    for _ in range(10):
+        if feed._last_msg_at:
+            break
+        if feed._task is None or feed._task.done():
+            break
+        await asyncio.sleep(0.25)
     alive = bool(feed._running and feed._task and not feed._task.done())
     receiving = bool(feed._last_msg_at)
     age = time.time() - feed._last_msg_at if feed._last_msg_at else None
@@ -1063,7 +1060,7 @@ async def wait_for_ptb(t_start: int, timeout: float = 30.0) -> dict:
     ev = feed.store.event_for(t_start)
     try:
         await asyncio.wait_for(ev.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"t_start": t_start, "status": "timeout", "timeout": timeout}
     rec = feed.store.get(t_start)
     if rec is None:
@@ -1238,6 +1235,7 @@ async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
         "books": {},
         "fills": {},
         "tape": {},
+        "market_constraints": None,
         "errors": [],
     }
     market = None
@@ -1249,6 +1247,11 @@ async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
     finally:
         await pub.close()
     if market is not None:
+        try:
+            trading = getattr(market, "trading", None)
+            result["market_constraints"] = _to_jsonable(trading) if trading is not None else None
+        except Exception as exc:
+            result["errors"].append(f"constraints:{type(exc).__name__}")
         for side in ("UP", "DOWN"):
             try:
                 asset_id, how = _resolve_asset_id(market, side)
@@ -1277,7 +1280,7 @@ async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
             tick = decimal.Decimal(str(result["books"][side].get("tick_size")))
             if tick <= 0:
                 raise decimal.InvalidOperation
-            amount = ((decimal.Decimal("5") * best_ask / tick).to_integral_value(
+            amount = ((decimal.Decimal(5) * best_ask / tick).to_integral_value(
                 rounding=decimal.ROUND_CEILING
             ) * tick)
             result["fills"][side] = await estimate_market_price(
