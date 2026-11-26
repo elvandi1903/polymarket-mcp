@@ -6,9 +6,10 @@ exposes **Polymarket CLOB trading** (market reads + order placement) through the
 Proxy Wallet** (Magic / email) account and for connecting to **Hermes Agent**
 (or any MCP client) over **stdio**.
 
-> **Read first:** this is a money-moving tool. It ships **read-only by default**
-> (DRY-RUN). A live order requires two independent switches AND passes a
-> Proxy-Wallet preflight. No order is ever placed silently.
+> **Read first:** keep the agent in **DRY-RUN** (`POLY_ALLOW_LIVE=0`).
+> Live BUY is blocked by the server. The existing SELL path still requires
+> both live switches and the Proxy-Wallet preflight; the switches are not
+> a substitute for operator approval.
 
 ---
 
@@ -32,11 +33,11 @@ cross-checked against the installed `polymarket-client` source.
 
 ---
 
-## Tools (55)
+## Tools
 
 **Read (unauthenticated, no keys needed)**
 `search_markets`, `get_market`, `get_order_book`, `get_midpoint`, `get_price`,
-`get_last_trade_price`, `estimate_market_price`
+`get_last_trade_price`, `estimate_market_price`, `preview_buy_depth`
 
 **BTC 5m settlement reads (public, no keys)**
 `get_btc5m_snapshot`, `get_btc5m_resolution`, `get_recent_btc5m_resolutions` — on-demand reads only;
@@ -82,7 +83,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .          # runtime only
 .venv/bin/pip install -e '.[dev]'   # runtime + pytest + ruff
 .venv/bin/ruff check .              # lint
-.venv/bin/python -m pytest -q       # 85 tests
+.venv/bin/python -m pytest -q
 ```
 
 No hard-coded developer paths are required. The stdio test harness derives the
@@ -139,23 +140,42 @@ Hmm: `${...}` interpolation in Hermes' YAML — verify it resolves your OS env
 is an example starting point, **not** an instruction to edit Hermes config;
 this repo does not touch `~/.hermes/config.yaml`.
 
-## The two-factor gate
+## BUY depth preview and live-order gate
 
-A state-changing call is **LIVE only if both** `POLY_ALLOW_LIVE=1` **and**
-`confirm=true`. Otherwise it returns a full DRY-RUN preview (market
-constraints, resolved `asset_id`, tick/min-size) and sends nothing.
+Keep `POLY_ALLOW_LIVE=0` (the default) for agent use. The order tools
+otherwise require both `POLY_ALLOW_LIVE=1` and `confirm=true` to submit.
+Even with both set, the server rejects live BUYs, including batches that
+contain a BUY, before signing or submitting any order. No configuration
+switch overrides this BUY block.
+
+Use `preview_buy_depth(market, outcome)` to estimate a BUY from the public
+order book. It consumes the cheapest eligible asks first, up to **5 shares**
+at **0.72 USD/share** or less. For example, two shares at 0.50 and three at
+0.55 cost **2.65 USD before fees**. Less eligible depth means a smaller
+estimate. At the price and quantity ceilings, the book notional is at most
+3.60 USD before fees. The separate **5 USD including fees** ceiling is
+reported but not verified by this preview. The book timestamp is provided
+when available; this is not a freshness check, fill guarantee, or a test of
+minimum order size, tick precision, or order eligibility.
+
+The installed SDK (`polymarket-client==0.20.1`) takes USD notional for a
+market BUY, and its `max_spend` is an estimate based on recent fee rates.
+This deployment does not have a verified execution path that enforces both
+the share cap and the all-in cap. Existing DRY-RUN order previews and BTC
+snapshot estimates are unchanged; use `preview_buy_depth` for the capped
+book-depth calculation.
 
 ## Testing (offline, no funds)
 
 ```bash
 .venv/bin/ruff check .
-.venv/bin/python -m pytest -q   # 85 passed
+.venv/bin/python -m pytest -q
 ```
 
-The suite covers the Proxy preflight (including the misclassification trap),
-the two-factor gate, live-book durability (book snapshot authority,
-out-of-order/drop invalidation, freshness thresholds, rollover isolation),
-and the secret-leak regression scan (all tools × sentinel secrets).
+The suite covers the BUY depth preview and live BUY block, Proxy preflight
+(including the misclassification trap), the two-factor gate, live-book durability
+(book snapshot authority, out-of-order/drop invalidation, freshness thresholds,
+rollover isolation), and the secret-leak regression scan (sentinel secrets).
 
 Live read tools were also exercised against real CLOB/Gamma endpoints with
 **no keys** (public client only) and the live BTC 5m book streamed at

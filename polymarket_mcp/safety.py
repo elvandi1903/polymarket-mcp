@@ -14,9 +14,21 @@ from typing import Literal
 
 from .config import Settings
 
+MAX_BUY_SHARES = Decimal(5)
+MAX_BUY_PRICE = Decimal("0.72")
+MAX_BUY_SPEND = Decimal(5)
+
 
 class ValidationError(RuntimeError):
     pass
+
+
+def reject_live_buy() -> None:
+    raise ValidationError(
+        "Live BUY is disabled: the market-order SDK cannot guarantee at most "
+        f"{MAX_BUY_SHARES} shares, {MAX_BUY_SPEND} USD including fees, and "
+        f"{MAX_BUY_PRICE} USD per share. Use preview_buy_depth for DRY-RUN."
+    )
 
 
 def to_decimal(value: str | float, field: str) -> Decimal:

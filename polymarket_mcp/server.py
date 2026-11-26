@@ -39,15 +39,14 @@ from . import safety
 from .config import Settings
 
 INSTRUCTIONS = (
-    "Polymarket trading tools. Read tools are always safe. Order tools are "
-    "DRY-RUN by default: they validate and preview only. To place a LIVE order "
-    "the caller must pass confirm=true AND the server env POLY_ALLOW_LIVE must "
-    "be 1. The account is a legacy Proxy Wallet; every order call first runs a "
-    "preflight that refuses unless the wallet classifies as POLY_PROXY "
-    "(signature_type=1). For BUY market orders provide amount (USD notional); "
-    "for SELL market orders provide shares. Limit orders need price and size "
-    "(shares). Always show the user the order fields and the DRY-RUN preview "
-    "before asking for confirm=true."
+    "Polymarket trading tools. Order tools are DRY-RUN by default: they "
+    "validate and preview only. Live BUY is disabled; use preview_buy_depth "
+    "to estimate up to 5 shares at $0.72 per share or less, before fees. "
+    "Market SELL uses shares and requires confirm=true AND POLY_ALLOW_LIVE=1 "
+    "to submit. The account is a legacy Proxy Wallet; the server refuses "
+    "authenticated orders unless the wallet classifies as POLY_PROXY "
+    "(signature_type=1). Show the user the DRY-RUN preview before requesting "
+    "approval. Limit orders are not supported."
 )
 
 class _StaticBearerVerifier:
@@ -400,11 +399,10 @@ async def place_market_order(
     order_type: str = "FAK",
     confirm: bool = False,
 ) -> dict:
-    """Place a market order. DRY-RUN unless POLY_ALLOW_LIVE=1 AND confirm=true.
+    """Preview a market BUY or SELL; live BUY is disabled.
 
-    BUY uses amount (USD notional); SELL uses shares. max_spend caps total
-    USD incl. fees; max_price/min_price bound the execution price.
-    order_type is FAK (default) or FOK.
+    BUY previews use amount (USD notional); SELL uses shares. Live SELL
+    requires POLY_ALLOW_LIVE=1 and confirm=true. Order type is FAK or FOK.
     """
     from decimal import Decimal
 
@@ -423,9 +421,11 @@ async def place_market_order(
         raise safety.ValidationError("BUY market order requires amount (USD notional)")
     if s == "SELL" and shr is None:
         raise safety.ValidationError("SELL market order requires shares")
+    gate = safety.gate_result(st, confirm)
+    if gate["live"] and s == "BUY":
+        safety.reject_live_buy()
     cap = amt if amt is not None else (mspend if mspend is not None else Decimal(0))
     safety.check_notional(st, cap)
-    gate = safety.gate_result(st, confirm)
     _mkt, asset_id, how, constraints = await _resolve_market(market, o)
 
     if gate["mode"] == "DRY_RUN":
@@ -773,6 +773,54 @@ async def revoke_api_credentials(rotate: bool = False, new_nonce: int = 0) -> di
 
 # -------------------------------------------------------------- ORDER OPS --
 @mcp.tool()
+async def preview_buy_depth(market: str, outcome: str) -> dict:
+    """Estimate up to 5 shares at $0.72/share or less from public asks. No order."""
+    o = safety.validate_outcome(outcome)
+    _, asset_id, _, _ = await _resolve_market(market, o)
+    pub = clientmod.build_public_client()
+    try:
+        book = await pub.get_order_book(asset_id=asset_id)
+    finally:
+        await pub.close()
+    if book.asset_id != asset_id:
+        raise safety.ValidationError("Order book asset does not match the requested outcome")
+    if any(
+        not level.price.is_finite() or not level.size.is_finite()
+        or not 0 < level.price < 1 or level.size <= 0
+        for level in book.asks
+    ):
+        raise safety.ValidationError("Order book contains an invalid ask price or size")
+
+    remaining = safety.MAX_BUY_SHARES
+    notional = decimal.Decimal(0)
+    worst_price = None
+    for level in sorted(book.asks, key=lambda level: level.price):
+        if remaining == 0 or level.price > safety.MAX_BUY_PRICE:
+            break
+        quantity = min(remaining, level.size)
+        notional += quantity * level.price
+        remaining -= quantity
+        worst_price = level.price
+
+    return {
+        "status": "DRY_RUN",
+        "market_ref": market,
+        "outcome": o,
+        "asset_id": asset_id,
+        "book_timestamp": book.timestamp.isoformat() if book.timestamp is not None else None,
+        "max_shares": str(safety.MAX_BUY_SHARES),
+        "max_price": str(safety.MAX_BUY_PRICE),
+        "max_spend_including_fees": str(safety.MAX_BUY_SPEND),
+        "estimated_shares": str(safety.MAX_BUY_SHARES - remaining),
+        "estimated_notional_before_fees": str(notional),
+        "worst_price": str(worst_price) if worst_price is not None else None,
+        "all_in_spend_verified": False,
+        "live_buy_allowed": False,
+        "note": "Book-depth estimate only; does not verify fees or order eligibility and is not an execution quote.",
+    }
+
+
+@mcp.tool()
 async def preview_order(
     market: str,
     outcome: str,
@@ -867,6 +915,13 @@ async def place_batch_order(
         raise safety.ValidationError(f"orders_json must be a JSON array: {exc}") from exc
     if not isinstance(reqs, list) or not reqs:
         raise safety.ValidationError("orders_json must be a non-empty JSON array")
+    gate = safety.gate_result(st, confirm)
+    if gate["live"]:
+        for req in reqs:
+            if not isinstance(req, dict):
+                raise safety.ValidationError("each order must be a JSON object")
+            if safety.validate_side(req.get("side", "")) == "BUY":
+                safety.reject_live_buy()
     batch = []
     for req in reqs:
         if not isinstance(req, dict):
@@ -886,7 +941,6 @@ async def place_batch_order(
                 "constraints": constraints_full,
             }
         )
-    gate = safety.gate_result(st, confirm)
     previews = []
     for b in batch:
         pre = orders.preflight_for_order(st, market_constraints=b["constraints"], side=b["side"], outcome=b["outcome"])
