@@ -558,7 +558,8 @@ async def get_live_top_of_book(asset_id: str) -> dict:
     if st is None:
         st = await manager.subscribe(asset_id)
     snap = st.snapshot_dict()
-    if snap.get("book_snapshot") is None:
+    book = snap.get("book_snapshot")
+    if book is None or snap.get("tick_size") is None or not book.get("asks"):
         await manager._rest_fallback(st)
         snap = st.snapshot_dict()
     book = snap.get("book_snapshot") or {}

@@ -7,6 +7,8 @@ and per-asset isolation (the rollover invariant).
 import asyncio
 from types import SimpleNamespace as NS
 
+import pytest
+
 from polymarket_mcp.live import AssetStream, LiveBookManager
 
 
@@ -205,6 +207,37 @@ def test_live_top_of_book_bootstraps_cold_subscription_from_rest(monkeypatch):
     out = asyncio.run(get_live_top_of_book("A1"))
 
     assert out["bid"] == "0.6"
+    assert out["ask"] == "0.99"
+    assert out["tick_size"] == "0.01"
+    assert out["source"] == "clob_rest_snapshot"
+
+
+@pytest.mark.parametrize("missing", ["tick_size", "asks"])
+def test_live_top_of_book_refreshes_partial_ws_book_from_rest(monkeypatch, missing):
+    from polymarket_mcp import live as livemod
+    from polymarket_mcp.server import get_live_top_of_book
+
+    m = LiveBookManager()
+    st = AssetStream(asset_id="A1")
+    st.apply_book(_book(0.60, 2000), local_now_ms=2000)
+    if missing == "tick_size":
+        st.book["tick_size"] = None
+    else:
+        st.book["asks"] = []
+
+    fallback_calls = []
+
+    async def rest_fallback(state):
+        fallback_calls.append(state.asset_id)
+        state.apply_book(_book(0.60, 2000), local_now_ms=2000, source="clob_rest_snapshot")
+
+    m._streams["A1"] = st
+    monkeypatch.setattr(m, "_rest_fallback", rest_fallback)
+    monkeypatch.setattr(livemod, "get_manager", lambda: m)
+
+    out = asyncio.run(get_live_top_of_book("A1"))
+
+    assert fallback_calls == ["A1"]
     assert out["ask"] == "0.99"
     assert out["tick_size"] == "0.01"
     assert out["source"] == "clob_rest_snapshot"

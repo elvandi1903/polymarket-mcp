@@ -82,7 +82,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .          # runtime only
 .venv/bin/pip install -e '.[dev]'   # runtime + pytest + ruff
 .venv/bin/ruff check .              # lint
-.venv/bin/python -m pytest -q       # 81 tests
+.venv/bin/python -m pytest -q       # 83 tests
 ```
 
 No hard-coded developer paths are required. The stdio test harness derives the
@@ -149,7 +149,7 @@ constraints, resolved `asset_id`, tick/min-size) and sends nothing.
 
 ```bash
 .venv/bin/ruff check .
-.venv/bin/python -m pytest -q   # 81 passed
+.venv/bin/python -m pytest -q   # 83 passed
 ```
 
 The suite covers the Proxy preflight (including the misclassification trap),
