@@ -24,7 +24,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import decimal
+import hmac
+import ipaddress
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     # RESMI: mcp >= 2.x
@@ -65,7 +69,7 @@ class _StaticBearerVerifier:
     async def verify_token(self, token: str):
         from mcp.server.auth.provider import AccessToken
 
-        if not self._expected or token != self._expected:
+        if not self._expected or not hmac.compare_digest(token.encode(), self._expected.encode()):
             return None
         return AccessToken(
             token=token,
@@ -74,74 +78,66 @@ class _StaticBearerVerifier:
         )
 
 
-def _transport_security(host: str, allowed_hosts: list[str] | None = None):
+def _host_ip(host: str):
+    try:
+        return ipaddress.ip_address(host.removeprefix("[").removesuffix("]"))
+    except ValueError:
+        return None
+
+
+def _require_http_token(host: str, token: str) -> None:
+    address = _host_ip(host)
+    if host != "localhost" and not (address and address.is_loopback) and not token:
+        raise ValueError("POLY_HTTP_TOKEN is required for non-loopback HTTP/SSE binds")
+
+
+def _transport_security(host: str, port: int = 8000):
     from mcp.server.transport_security import TransportSecuritySettings
 
-    if allowed_hosts is None:
-        if host == "0.0.0.0":
-            return TransportSecuritySettings(enable_dns_rebinding_protection=False)
-        if host in ("127.0.0.1", "localhost"):
-            return TransportSecuritySettings(
-                enable_dns_rebinding_protection=True,
-                allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-                allowed_origins=["*"],
-            )
-        return TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=[f"{host}:*", "127.0.0.1:*", "localhost:*"],
-            allowed_origins=["*"],
-        )
+    hosts = [entry.strip().lower() for entry in os.getenv("POLY_HTTP_ALLOWED_HOSTS", "").split(",") if entry.strip()]
+    address = _host_ip(host)
+    if address and address.is_unspecified:
+        if not hosts:
+            raise ValueError("POLY_HTTP_ALLOWED_HOSTS is required for wildcard binds")
+    else:
+        bind_host = f"[{address}]" if address and address.version == 6 else host.lower()
+        hosts.extend((bind_host, f"{bind_host}:{port}"))
+    if any(any(c in value for c in "*/?#@\\ ") for value in hosts):
+        raise ValueError("POLY_HTTP_ALLOWED_HOSTS must contain exact Host values")
+
+    origins = [entry.strip() for entry in os.getenv("POLY_HTTP_ALLOWED_ORIGINS", "").split(",") if entry.strip()]
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None
+                or parsed.path or parsed.query or parsed.fragment or any(c in origin for c in "*\\ ?#")):
+            raise ValueError("POLY_HTTP_ALLOWED_ORIGINS must contain exact HTTP(S) origins")
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed_hosts,
-        allowed_origins=["*"],
+        allowed_hosts=hosts,
+        allowed_origins=origins,
     )
 
 
-def _make_server(host: str = "0.0.0.0", port: int = 8000,
-                 allowed_hosts: list[str] | None = None) -> Any:
-    import os
-
-    token = os.environ.get("POLY_HTTP_TOKEN", "").strip()
-    if _MCP_V2:
-        kwargs: dict[str, Any] = {"instructions": INSTRUCTIONS}
-        if token:
-            from mcp.server.auth.settings import AuthSettings
-
-            kwargs["token_verifier"] = _StaticBearerVerifier(token)
-            kwargs["auth"] = AuthSettings(
-                issuer_url="https://polymarket.local",
-                resource_server_url="https://polymarket.local/mcp",
-                required_scopes=[],
-            )
-        return _Server("polymarket-trading", **kwargs)
-
-    transport_security = _transport_security(host, allowed_hosts)
+def _make_server(host: str = "127.0.0.1", port: int = 8000) -> Any:
+    token = os.getenv("POLY_HTTP_TOKEN", "").strip()
+    _require_http_token(host, token)
+    kwargs: dict[str, Any] = {"instructions": INSTRUCTIONS}
     if token:
         from mcp.server.auth.settings import AuthSettings
 
-        return _Server(
-            "polymarket-trading",
-            instructions=INSTRUCTIONS,
-            host=host,
-            port=port,
-            token_verifier=_StaticBearerVerifier(token),
-            auth=AuthSettings(
-                issuer_url="https://polymarket.local",
-                resource_server_url="https://polymarket.local/mcp",
-                required_scopes=[],
-            ),
-            transport_security=transport_security,
+        kwargs["token_verifier"] = _StaticBearerVerifier(token)
+        kwargs["auth"] = AuthSettings(
+            issuer_url="https://polymarket.local",
+            resource_server_url="https://polymarket.local/mcp",
+            required_scopes=[],
+            **({"validate_token_resource": False} if _MCP_V2 else {}),
         )
-    return _Server(
-        "polymarket-trading",
-        instructions=INSTRUCTIONS,
-        host=host,
-        port=port,
-        transport_security=transport_security,
-    )
+    if not _MCP_V2:
+        kwargs.update(host=host, port=port, transport_security=_transport_security(host, port))
+    return _Server("polymarket-trading", **kwargs)
 
 
+_configured_http_token = os.getenv("POLY_HTTP_TOKEN", "").strip()
 mcp = _make_server()
 
 
@@ -1413,32 +1409,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    if _MCP_V2:
-        kwargs: dict[str, Any] = {}
-        if args.transport in ("streamable-http", "sse"):
-            kwargs.update(host=args.host, port=args.port, transport_security=_transport_security(args.host))
-        if args.transport == "streamable-http":
-            kwargs["streamable_http_path"] = args.path
-        asyncio.run(observability.run_with_heartbeat(_transport_runner(args.transport), **kwargs))
-        return
-
-    if args.transport in ("streamable-http", "sse"):
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        mcp.settings.streamable_http_path = args.path
-        from mcp.server.transport_security import TransportSecuritySettings
-
-        if args.host == "0.0.0.0":
-            mcp.settings.transport_security = TransportSecuritySettings(
-                enable_dns_rebinding_protection=False,
-            )
-        elif args.host in ("127.0.0.1", "localhost"):
-            mcp.settings.transport_security = TransportSecuritySettings(
-                enable_dns_rebinding_protection=True,
-                allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-                allowed_origins=["*"],
-            )
-    asyncio.run(observability.run_with_heartbeat(_transport_runner(args.transport)))
+    kwargs: dict[str, Any] = {}
+    if args.transport != "stdio":
+        try:
+            _require_http_token(args.host, _configured_http_token)
+            security = _transport_security(args.host, args.port)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        if _MCP_V2:
+            kwargs.update(host=args.host, port=args.port, transport_security=security)
+            if args.transport == "streamable-http":
+                kwargs["streamable_http_path"] = args.path
+        else:
+            mcp.settings.host = args.host
+            mcp.settings.port = args.port
+            mcp.settings.streamable_http_path = args.path
+            mcp.settings.transport_security = security
+    asyncio.run(observability.run_with_heartbeat(_transport_runner(args.transport), **kwargs))
 
 
 def _transport_runner(transport: str):

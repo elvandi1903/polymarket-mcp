@@ -456,11 +456,10 @@ MCP mendukung dua transport (`mcp==2.3.0` MCPServer, dengan fallback FastMCP 1.x
 args `FastMCP(host=..., port=...)`. Module ini mem-parsing CLI flags `--host`,
 `--port`, `--path` dan men-set `mcp.settings` sebelum `run()`.
 
-**Keamanan HTTP:** secara default tidak ada auth pada server HTTP ini
-(`transport_security=None`, `auth=None` di FastMCP). Binding default adalah
-`127.0.0.1` saja — aman untuk single-machine. Jika Anda mengekspos ke publik/
-InstaBox, gunakan auth di reverse proxy atau jangan expose ke `0.0.0.0` tanpa
-perlindungan.
+**Keamanan HTTP:** default bind `127.0.0.1`. Non-loopback wajib menggunakan
+`POLY_HTTP_TOKEN` dari environment proses. Host dan Origin diperiksa untuk
+HTTP dan SSE; Origin browser ditolak secara default. Stdio tidak memakai
+bearer HTTP.
 
 **Test yang sudah dijalankan:**
 
@@ -475,40 +474,19 @@ dipilih).
 
 ## HTTP security (for VM / external access)
 
-Muse di luar VM (VM luar) akan akses MCP HTTP sebagai client. Untuk itu:
+Non-loopback binds require `POLY_HTTP_TOKEN` exported before startup. When
+configured, the token is required on loopback HTTP too. Send it as a Bearer
+token over TLS. The verifier uses `hmac.compare_digest`.
 
-1. **Bind loopback hanya** kalau MCP dan client di mesin yang sama:
-   `--host 127.0.0.1`. Kalau beda mesin, bind ke IP/0.0.0.0 agar port forwarding
-   InstaBox bisa diarahkan, tetapi **wajib** pakai token (poin 2).
+`POLY_HTTP_ALLOWED_HOSTS` accepts comma-separated exact Host values. By default
+only the bind host, with or without the configured port, is accepted. Wildcard
+binds (`0.0.0.0` or `::`) require an explicit list. Browser Origins are denied
+unless explicitly listed in `POLY_HTTP_ALLOWED_ORIGINS` as exact HTTP(S) origins.
+Native clients may omit Origin. These settings come from the process environment.
 
-2. **Bearer token wajib** (`POLY_HTTP_TOKEN`): server akan menolak request
-   tanpa token (`401 invalid_token`) atau dengan token salah. Token dibuat
-   sebagai 64-char base64 (`secrets.token_urlsafe(48)`) dan disimpan di
-   `~/.config/polymarket-mcp/http_token.txt` (0600) dan `.env` (0600).
-   Client mengirim header:
-   ```
-   Authorization: Bearer <token>
-   ```
-
-3. **Token tidak pernah di-log atau dikembalikan di response.** Verifier
-   hanya membandingkan string; tidak ada token yang dicetak ke stdout/stderr.
-
-4. **TLS/reverse-proxy disarankan** kalau expose ke publik (InstaBox public
-   port). HTTPS terminasi di InstaBox edge; tunnel tetap memerlukan token.
-
-5. **stdio tidak terkena auth HTTP** — token hanya berlaku untuk
-   `streamable-http`/`sse`. Mode stdio tetap untuk Hermes lokal.
-
-Contoh run aman untuk VM luar:
+After exporting a token from your secret manager, for example:
 
 ```bash
-POLY_HTTP_TOKEN=$(cat ~/.config/polymarket-mcp/http_token.txt) \
+POLY_HTTP_ALLOWED_HOSTS=mcp.example.test \
 polymarket-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --path /mcp
-# client VM luar: POST http://<vm-ip>:8000/mcp  dengan header
-# Authorization: Bearer <token>
 ```
-
-Tes yang sudah dijalankan:
-- Unauthenticated POST → 401 invalid_token.
-- Wrong token → 401.
-- Valid token → 200 + `serverInfo.polymarket-trading@1.30.0` + tools/list.
