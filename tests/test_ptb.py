@@ -5,6 +5,8 @@ import os
 import tempfile
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -208,6 +210,79 @@ def test_live_update_captures_exact_boundary():
     got = feed.store.get(1794051600)
     assert got is not None and got.ptb == Decimal("76042.67207536352")
     assert got.reconstructed_from_snapshot is False
+
+
+def test_auth_invalid_stops_feed_without_reconnect(monkeypatch):
+    from aiohttp import WSMsgType
+
+    feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
+    connections = []
+
+    class FakeWebSocket:
+        async def __aenter__(self):
+            connections.append(self)
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def send_json(self, _payload):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if hasattr(self, "sent_error"):
+                raise StopAsyncIteration
+            self.sent_error = True
+            return SimpleNamespace(
+                type=WSMsgType.TEXT,
+                data=json.dumps({"op": "error", "rid": "a1", "code": "auth_invalid"}),
+            )
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def ws_connect(self, *_args, **_kwargs):
+            return FakeWebSocket()
+
+    async def fail_if_sleep_called(_delay):
+        pytest.fail("auth failure must not enter reconnect backoff")
+
+    monkeypatch.setattr("aiohttp.ClientSession", FakeSession)
+    monkeypatch.setattr(asyncio, "sleep", fail_if_sleep_called)
+
+    async def run_and_try_restart():
+        await feed.run()
+        assert feed._task is None
+        feed.start()
+        assert feed._task is None
+
+    asyncio.run(run_and_try_restart())
+
+    assert len(connections) == 1
+    assert feed._running is False
+    assert feed.auth_failed is True
+    assert feed.last_error == "auth_invalid"
+
+
+def test_ptb_status_exposes_auth_failure():
+    from polymarket_mcp.server import ptb_status
+
+    feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
+    feed.auth_failed = True
+    feed.last_error = "auth_invalid"
+
+    with patch("polymarket_mcp.ptb.get_feed", return_value=feed):
+        status = asyncio.run(ptb_status())
+
+    assert status["auth_failed"] is True
+    assert status["last_error"] == "auth_invalid"
 
 
 def test_error_handling_auth_failed_does_not_loop_blindly():

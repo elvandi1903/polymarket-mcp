@@ -1019,6 +1019,8 @@ async def ptb_status() -> dict:
         "unavailable_count": len([r for r in recs if r.status == "UNAVAILABLE"]),
         "dropped": feed.dropped_count(),
         "seq_gaps": feed.seq_gaps(),
+        "auth_failed": feed.auth_failed,
+        "last_error": feed.last_error,
         "last_points": feed.last_points(10),
         "records": [r.__dict__ for r in recs],
     }

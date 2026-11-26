@@ -82,7 +82,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .          # runtime only
 .venv/bin/pip install -e '.[dev]'   # runtime + pytest + ruff
 .venv/bin/ruff check .              # lint
-.venv/bin/python -m pytest -q       # 83 tests
+.venv/bin/python -m pytest -q       # 85 tests
 ```
 
 No hard-coded developer paths are required. The stdio test harness derives the
@@ -149,7 +149,7 @@ constraints, resolved `asset_id`, tick/min-size) and sends nothing.
 
 ```bash
 .venv/bin/ruff check .
-.venv/bin/python -m pytest -q   # 83 passed
+.venv/bin/python -m pytest -q   # 85 passed
 ```
 
 The suite covers the Proxy preflight (including the misclassification trap),
@@ -215,6 +215,13 @@ Read-only — no order is placed.
 `user` stream and buffers `order` / `trade` events (newest last). Requires
 configured CLOB credentials; subscribing never places or cancels orders.
 Stream errors are surfaced in `user_stream_status().error`.
+
+**Price-to-Beat feed authentication**
+`start_ptb_feed`, `stop_ptb_feed`, and `ptb_status` manage the authenticated
+PolyBolt TWAP feed. `auth_failed`, `auth_invalid`, and `auth_required` are
+terminal for the current feed instance: it stops instead of entering reconnect
+backoff. `ptb_status` exposes `auth_failed` and `last_error`; after correcting
+credentials, call `stop_ptb_feed` before starting a fresh feed instance.
 
 ## Credentials (CLOB L2, automatic lifecycle)
 

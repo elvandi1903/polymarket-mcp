@@ -334,6 +334,8 @@ class PtbFeed:
         self._seq_gaps: int = 0
         self._connected_at: float = 0.0
         self._running = False
+        self.auth_failed = False
+        self.last_error: str | None = None
         self._pending_points: deque[PtbPoint] = deque(maxlen=600)
 
     def captured(self, t_start: int) -> PtbRecord | None:
@@ -391,6 +393,12 @@ class PtbFeed:
                         raise ConnectionError(str(hs))
             except asyncio.CancelledError:
                 raise
+            except PermissionError as exc:
+                self._running = False
+                if self.last_error is None:
+                    self.auth_failed = True
+                    self.last_error = str(exc)
+                self.log.error("ptb feed stopped: %s", self.last_error)
             except Exception as exc:
                 delay = next_backoff(exc, attempt)
                 attempt += 1
@@ -408,12 +416,15 @@ class PtbFeed:
             return
         if obj.get("op") == "error":
             self.log.warning("polybolt error: %s", obj)
-            if obj.get("code") in ("auth_failed", "auth_invalid", "auth_required"):
+            code = obj.get("code")
+            if code in ("auth_failed", "auth_invalid", "auth_required"):
+                self.auth_failed = True
+                self.last_error = str(code)
                 self.log.error("auth failed; fix credentials (no blind retry)")
                 # PolyBolt live wire uses code "auth_invalid" for bad creds
                 # (verified against live connection). auth_required follows.
                 # Hard-fail this connection instead of silently looping.
-                raise PermissionError(f"polybolt {obj.get('code')}")
+                raise PermissionError(f"polybolt {code}")
             return
         if obj.get("channel") == "price.crypto.twap":
             self._last_msg_at = time.time()
@@ -530,6 +541,8 @@ class PtbFeed:
                     await self._ws.close()
 
     def start(self) -> None:
+        if self.auth_failed:
+            return
         self._task = asyncio.create_task(self.run(), name="ptb-feed")
         asyncio.create_task(self.stall_watchdog(), name="ptb-stall-watchdog")
 
