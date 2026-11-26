@@ -384,6 +384,46 @@ async def list_open_orders(asset_id: str = "", market: str = "") -> dict:
         await client.close()
 
 
+def _buy_ledger():
+    from .round_guard import BuyLedger
+
+    return BuyLedger(observability._state_dir() / "buy-ledger.sqlite3")
+
+
+@_tool
+async def reconcile_round(window_start: int) -> dict:
+    """Read exact-round account evidence without releasing a claim or resubmitting."""
+    from .resolution import window_bounds
+
+    if type(window_start) is not int or window_start <= 0 or window_start % 300:
+        raise safety.ValidationError("window_start must be a positive UTC epoch multiple of 300")
+    start, _, slug = window_bounds(window_start)
+    public = clientmod.build_public_client()
+    try:
+        market = await public.get_market(slug=slug)
+    finally:
+        await public.close()
+    condition_id = getattr(market, "condition_id", None)
+    if getattr(market, "slug", None) != slug or not condition_id:
+        raise safety.ValidationError("Could not verify the round's condition ID")
+
+    claim = _buy_ledger().claim(start)
+    client = await clientmod.build_readonly_account_client(_settings())
+    try:
+        orders, positions = [], []
+        async for page in client.list_open_orders(market=condition_id):
+            orders.extend(_to_jsonable(row) for row in page.items if row.condition_id == condition_id)
+        async for page in client.list_positions(condition_id=condition_id, full_history=True):
+            positions.extend(_to_jsonable(row) for row in page.items if row.condition_id == condition_id)
+    finally:
+        await client.close()
+    return {
+        "window_start": start, "slug": slug, "claim_status": claim,
+        "open_orders": orders, "positions": positions,
+        "note": "Account evidence only. An empty result does not prove no fill; no claim or budget was changed.",
+    }
+
+
 @_tool
 async def get_trading_approvals_state() -> dict:
     client = await clientmod.build_secure_client(_settings())

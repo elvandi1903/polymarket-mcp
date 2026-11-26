@@ -92,6 +92,24 @@ def build_public_client() -> AsyncPublicClient:
     return AsyncPublicClient(PRODUCTION)
 
 
+async def build_readonly_account_client(settings: Settings) -> AsyncSecureClient:
+    """Use existing L2 credentials without derivation or wallet setup."""
+    creds = build_credentials(settings)
+    if creds is None or not settings.wallet:
+        raise PreflightError("Account reads require an explicit wallet and existing CLOB credentials")
+    info = assert_proxy_wallet(settings)
+    # In the pinned SDK, create() can replace rejected credentials and deploy
+    # a wallet. _create with validation disabled and provided creds does neither.
+    client = await AsyncSecureClient._create(
+        private_key=settings.private_key, wallet=settings.wallet,
+        credentials=creds, validate_credentials=False,
+    )
+    if client.wallet_type != info["wallet_type"]:
+        await client.close()
+        raise PreflightError("SDK wallet classification differs from preflight")
+    return client
+
+
 async def build_secure_client(settings: Settings) -> AsyncSecureClient:
     """Create a secure client and verify it settled on POLY_PROXY.
 

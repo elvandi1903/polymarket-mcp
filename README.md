@@ -180,6 +180,21 @@ the share cap and the all-in cap. Existing DRY-RUN order previews and BTC
 snapshot estimates are unchanged; use `preview_buy_depth` for the capped
 book-depth calculation.
 
+## BUY budget and round reconciliation
+
+`reconcile_round(window_start)` is an operator-only evidence view. It reads the
+exact BTC 5m round's open orders and positions using existing CLOB credentials;
+it never creates credentials, submits, retries, or releases a claim. Absence
+from those two lists does not establish that an order did not fill.
+
+The SQLite BUY ledger is tested independently of submission. Its day boundary
+is midnight UTC. A reservation requires a positive daily cap and atomically
+claims the round. SDK-typed `unmatched` and `not_enough_balance` release the
+reservation, not the claim. A match keeps the reservation charged; unknown or
+interrupted outcomes also stay charged. SDK 0.20.1 does not expose `INVALID`
+as a typed rejection, so ambiguous errors are not treated as no-fill. The BUY
+execution path is disabled; these tools do not create live reservations.
+
 ## Guard audit and watchdog
 
 The server appends guard decisions and SDK submission outcomes to
