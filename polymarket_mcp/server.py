@@ -140,6 +140,36 @@ def _make_server(host: str = "127.0.0.1", port: int = 8000) -> Any:
 _configured_http_token = os.getenv("POLY_HTTP_TOKEN", "").strip()
 mcp = _make_server()
 
+_AUTONOMOUS_SAFE_TOOLS = frozenset({
+    "search_markets", "get_market", "get_order_book", "get_midpoint", "get_price",
+    "get_last_trade_price", "estimate_market_price", "preview_buy_depth", "preview_order",
+    "place_market_order", "place_batch_order", "guard_status", "get_btc5m_snapshot",
+    "get_btc5m_resolution", "get_recent_btc5m_resolutions", "get_ptb", "ptb_status",
+    "wait_for_ptb", "list_ptb", "subscribe_book", "get_live_book", "get_live_top_of_book",
+    "subscribe_round", "round_status", "stream_health", "market_data_status",
+    "market_data_snapshot", "market_data_last_points", "start_market_data", "start_ptb_feed",
+})
+
+
+_AUTONOMOUS_AT_START = os.getenv("POLY_AUTONOMOUS", "0").strip() != "0"
+
+
+def _autonomous() -> bool:
+    return _AUTONOMOUS_AT_START or os.getenv("POLY_AUTONOMOUS", "0").strip() != "0"
+
+
+def _autonomous_tool_allowed(name: str) -> bool:
+    configured = os.getenv("POLY_AUTONOMOUS_TOOLS")
+    return name in _AUTONOMOUS_SAFE_TOOLS and (
+        configured is None or name in {item.strip() for item in configured.split(",")}
+    )
+
+
+def _tool(func):
+    if not _autonomous() or _autonomous_tool_allowed(func.__name__):
+        mcp.tool()(func)
+    return func
+
 
 def _settings() -> Settings:
     """Read env fresh per call so tests/in-process callers can set vars."""
@@ -209,7 +239,7 @@ def _resolve_asset_id(market: Any, outcome: str) -> tuple[str, str]:
     )
 
 
-@mcp.tool()
+@_tool
 async def search_markets(q: str, page_size: int = 10) -> dict:
     """Search Polymarket for markets/events. Read-only, no key required."""
     pub = clientmod.build_public_client()
@@ -222,7 +252,7 @@ async def search_markets(q: str, page_size: int = 10) -> dict:
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def get_market(slug: str = "", market_id: str = "", url: str = "") -> dict:
     """Fetch one market by slug, id, or URL and return its trading constraints."""
     pub = clientmod.build_public_client()
@@ -235,7 +265,7 @@ async def get_market(slug: str = "", market_id: str = "", url: str = "") -> dict
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def get_order_book(asset_id: str) -> dict:
     """Order book for one outcome asset id (token/position id). Read-only."""
     pub = clientmod.build_public_client()
@@ -247,7 +277,7 @@ async def get_order_book(asset_id: str) -> dict:
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def get_midpoint(asset_id: str) -> dict:
     pub = clientmod.build_public_client()
     try:
@@ -256,7 +286,7 @@ async def get_midpoint(asset_id: str) -> dict:
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def get_price(asset_id: str, side: str = "BUY") -> dict:
     pub = clientmod.build_public_client()
     try:
@@ -266,7 +296,7 @@ async def get_price(asset_id: str, side: str = "BUY") -> dict:
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def get_last_trade_price(asset_id: str) -> dict:
     pub = clientmod.build_public_client()
     try:
@@ -278,7 +308,7 @@ async def get_last_trade_price(asset_id: str) -> dict:
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def estimate_market_price(asset_id: str, side: str, amount: str = "", shares: str = "") -> dict:
     """Estimate the execution price of a market order at current depth. Read-only."""
     s = safety.validate_side(side)
@@ -298,7 +328,7 @@ async def estimate_market_price(asset_id: str, side: str, amount: str = "", shar
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 async def account_preflight() -> dict:
     """Show config summary + Proxy-Wallet classification. Moves no funds."""
     import time
@@ -313,7 +343,7 @@ async def account_preflight() -> dict:
     return summary
 
 
-@mcp.tool()
+@_tool
 async def get_balance_allowance(asset_type: str = "COLLATERAL", asset_id: str = "") -> dict:
     """Balance + allowance for the trading account. Read-only; requires keys."""
     client = await clientmod.build_secure_client(_settings())
@@ -326,7 +356,7 @@ async def get_balance_allowance(asset_type: str = "COLLATERAL", asset_id: str = 
         await client.close()
 
 
-@mcp.tool()
+@_tool
 async def list_positions() -> dict:
     client = await clientmod.build_secure_client(_settings())
     try:
@@ -340,7 +370,7 @@ async def list_positions() -> dict:
         await client.close()
 
 
-@mcp.tool()
+@_tool
 async def list_open_orders(asset_id: str = "", market: str = "") -> dict:
     client = await clientmod.build_secure_client(_settings())
     try:
@@ -354,7 +384,7 @@ async def list_open_orders(asset_id: str = "", market: str = "") -> dict:
         await client.close()
 
 
-@mcp.tool()
+@_tool
 async def get_trading_approvals_state() -> dict:
     client = await clientmod.build_secure_client(_settings())
     try:
@@ -383,7 +413,7 @@ async def _resolve_market(slug_or_id: str, outcome: str):
         await pub.close()
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def place_market_order(
     market: str,
@@ -419,7 +449,7 @@ async def place_market_order(
         raise safety.ValidationError("BUY market order requires amount (USD notional)")
     if s == "SELL" and shr is None:
         raise safety.ValidationError("SELL market order requires shares")
-    gate = safety.gate_result(st, confirm)
+    gate = safety.gate_result(st, confirm and not _autonomous())
     if gate["live"] and s == "BUY":
         observability.decision("live_buy_blocked")
         safety.reject_live_buy()
@@ -452,13 +482,13 @@ async def place_market_order(
         await client.close()
 
 
-@mcp.tool()
+@_tool
 async def guard_status() -> dict:
     """Show recent guard decisions and local audit/heartbeat health."""
     return observability.state.status()
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def cancel_order(order_id: str, confirm: bool = False) -> dict:
     """Cancel one order. DRY-RUN unless POLY_ALLOW_LIVE=1 AND confirm=true."""
@@ -476,7 +506,7 @@ async def cancel_order(order_id: str, confirm: bool = False) -> dict:
         await client.close()
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def cancel_all_orders(confirm: bool = False) -> dict:
     gate = safety.gate_result(_settings(), confirm)
@@ -493,7 +523,7 @@ async def cancel_all_orders(confirm: bool = False) -> dict:
         await client.close()
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def setup_trading_approvals(confirm: bool = False) -> dict:
     """Request pUSD + conditional-token exchange allowances. State-changing.
@@ -519,7 +549,7 @@ async def setup_trading_approvals(confirm: bool = False) -> dict:
 
 
 # -------------------------------------------------------------- LIVE BOOK --
-@mcp.tool()
+@_tool
 async def subscribe_book(asset_id: str, slug: str = "") -> dict:
     """Start (or reuse) a live WS subscription to an outcome asset id."""
     from polymarket_mcp.live import get_manager
@@ -529,7 +559,7 @@ async def subscribe_book(asset_id: str, slug: str = "") -> dict:
     return {"subscription": st.snapshot_dict(), "ok": True}
 
 
-@mcp.tool()
+@_tool
 async def unsubscribe_book(asset_id: str) -> dict:
     from polymarket_mcp.live import get_manager
 
@@ -538,7 +568,7 @@ async def unsubscribe_book(asset_id: str) -> dict:
     return {"asset_id": asset_id, "ok": bool(ok)}
 
 
-@mcp.tool()
+@_tool
 async def get_live_book(asset_id: str) -> dict:
     """Current live book + freshness. If no live stream exists, resync by REST."""
     from polymarket_mcp.live import get_manager
@@ -558,7 +588,7 @@ async def get_live_book(asset_id: str) -> dict:
     return st.snapshot_dict()
 
 
-@mcp.tool()
+@_tool
 async def get_live_top_of_book(asset_id: str) -> dict:
     """Return a compact, timestamped top-of-book snapshot for an asset."""
     from datetime import datetime
@@ -633,21 +663,21 @@ async def get_live_top_of_book(asset_id: str) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def stream_status() -> dict:
     from polymarket_mcp.live import get_manager
 
     return get_manager().status_snapshot()
 
 
-@mcp.tool()
+@_tool
 async def stream_events(asset_id: str, limit: int = 50) -> dict:
     from polymarket_mcp.live import get_manager
 
     return {"asset_id": asset_id, "events": get_manager().events_snapshot(asset_id, limit)}
 
 
-@mcp.tool()
+@_tool
 async def stream_health() -> dict:
     from polymarket_mcp.live import get_manager
 
@@ -666,7 +696,7 @@ async def stream_health() -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def watch_asset(slug: str, outcome: str = "UP") -> dict:
     """Subscribe to a market by slug and return the freshest live book.
 
@@ -694,7 +724,7 @@ async def watch_asset(slug: str, outcome: str = "UP") -> dict:
 
 
 # ---------------------------------------------------------- CREDENTIALS ---
-@mcp.tool()
+@_tool
 async def derive_api_credentials(nonce: int = 0) -> dict:
     """Derive-or-create CLOB L2 API credentials for the Proxy Wallet account.
 
@@ -709,7 +739,7 @@ async def derive_api_credentials(nonce: int = 0) -> dict:
     return await creds.derive_credentials(st)
 
 
-@mcp.tool()
+@_tool
 async def validate_api_credentials() -> dict:
     """Validate that the configured CLOB credentials are still active.
 
@@ -731,7 +761,7 @@ async def validate_api_credentials() -> dict:
     return await creds.validate_credentials(st, provided)
 
 
-@mcp.tool()
+@_tool
 async def test_connection() -> dict:
     """End-to-end connectivity test (preflight -> client -> balance read).
 
@@ -742,7 +772,7 @@ async def test_connection() -> dict:
     return await creds.test_connection(_settings())
 
 
-@mcp.tool()
+@_tool
 async def list_saved_credentials() -> dict:
     """Non-secret summary of the persisted credential file (if any)."""
     import polymarket_mcp.credentials as creds
@@ -750,7 +780,7 @@ async def list_saved_credentials() -> dict:
     return creds.saved_summary()
 
 
-@mcp.tool()
+@_tool
 async def save_api_credentials(api_key: str, secret: str, passphrase: str) -> dict:
     """Persist supplied credentials to the 0600 file (atomic write).
 
@@ -764,7 +794,7 @@ async def save_api_credentials(api_key: str, secret: str, passphrase: str) -> di
     return creds.save_credentials(ApiKeyCreds(apiKey=api_key, secret=secret, passphrase=passphrase))
 
 
-@mcp.tool()
+@_tool
 async def revoke_api_credentials(rotate: bool = False, new_nonce: int = 0) -> dict:
     """Delete the API key currently in use (DELETE /auth/api-key).
 
@@ -784,7 +814,7 @@ async def revoke_api_credentials(rotate: bool = False, new_nonce: int = 0) -> di
 
 
 # -------------------------------------------------------------- ORDER OPS --
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def preview_buy_depth(market: str, outcome: str) -> dict:
     """Estimate up to 5 shares at $0.72/share or less from public asks. No order."""
@@ -833,7 +863,7 @@ async def preview_buy_depth(market: str, outcome: str) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def preview_order(
     market: str,
@@ -888,7 +918,7 @@ async def preview_order(
     return preview
 
 
-@mcp.tool()
+@_tool
 async def track_order(order_id: str, timeout_s: float = 10.0) -> dict:
     """Poll get_order until terminal or timeout; never reposts.
 
@@ -903,7 +933,7 @@ async def track_order(order_id: str, timeout_s: float = 10.0) -> dict:
         await client.close()
 
 
-@mcp.tool()
+@_tool
 @observability.audit_tool
 async def place_batch_order(
     orders_json: str,
@@ -930,7 +960,7 @@ async def place_batch_order(
         raise safety.ValidationError(f"orders_json must be a JSON array: {exc}") from exc
     if not isinstance(reqs, list) or not reqs:
         raise safety.ValidationError("orders_json must be a non-empty JSON array")
-    gate = safety.gate_result(st, confirm)
+    gate = safety.gate_result(st, confirm and not _autonomous())
     if gate["live"]:
         for req in reqs:
             if not isinstance(req, dict):
@@ -1012,7 +1042,7 @@ async def place_batch_order(
 
 
 
-@mcp.tool()
+@_tool
 async def check_closed_only_mode() -> dict:
     """Return the account's closed-only mode (exit-only market). Read-only."""
     client = await clientmod.build_secure_client(_settings())
@@ -1023,7 +1053,7 @@ async def check_closed_only_mode() -> dict:
 
 
 # ----------------------------------------------------------------- PTB FEED --
-@mcp.tool()
+@_tool
 async def start_ptb_feed() -> dict:
     """Start the Price-to-Beat feed (PolyBolt price.crypto.twap).
 
@@ -1071,7 +1101,7 @@ async def start_ptb_feed() -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def stop_ptb_feed() -> dict:
     from polymarket_mcp.ptb import stop_ptb_feed
 
@@ -1079,7 +1109,7 @@ async def stop_ptb_feed() -> dict:
     return {"status": "stopped"}
 
 
-@mcp.tool()
+@_tool
 async def ptb_status() -> dict:
     from polymarket_mcp.ptb import get_feed
 
@@ -1097,7 +1127,7 @@ async def ptb_status() -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def get_ptb(t_start: int) -> dict:
     """Return the PTB record for a 5-minute window, or None if not captured."""
     from polymarket_mcp.ptb import get_feed
@@ -1123,7 +1153,7 @@ async def get_ptb(t_start: int) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def wait_for_ptb(t_start: int, timeout: float = 30.0) -> dict:
     """Wait up to `timeout` seconds for the PTB of a window."""
     import asyncio
@@ -1147,7 +1177,7 @@ async def wait_for_ptb(t_start: int, timeout: float = 30.0) -> dict:
     }
 
 
-@mcp.tool()
+@_tool
 async def list_ptb() -> dict:
     from polymarket_mcp.ptb import get_feed
 
@@ -1170,7 +1200,7 @@ async def list_ptb() -> dict:
 
 
 # ------------------------------------------------------ LIVE MARKET DATA --
-@mcp.tool()
+@_tool
 async def start_market_data(binance_symbol: str, coinbase_symbol: str) -> dict:
     """Start the Live Market Data Engine for the requested Spot products.
 
@@ -1186,7 +1216,7 @@ async def start_market_data(binance_symbol: str, coinbase_symbol: str) -> dict:
     ]}
 
 
-@mcp.tool()
+@_tool
 async def stop_market_data() -> dict:
     from polymarket_mcp.market_data import stop_engine
 
@@ -1194,14 +1224,14 @@ async def stop_market_data() -> dict:
     return {"status": "stopped"}
 
 
-@mcp.tool()
+@_tool
 async def market_data_status() -> dict:
     from polymarket_mcp.market_data import get_engine
 
     return get_engine().snapshot()
 
 
-@mcp.tool()
+@_tool
 async def market_data_snapshot(source: str) -> dict:
     """Most recent snapshot for one source ('binance' or 'coinbase')."""
     from polymarket_mcp.market_data import get_engine
@@ -1214,7 +1244,7 @@ async def market_data_snapshot(source: str) -> dict:
     return {"error": "source must be 'binance' or 'coinbase'"}
 
 
-@mcp.tool()
+@_tool
 async def market_data_last_points(source: str, limit: int = 20) -> dict:
     """Last N validated points for a source (with flags)."""
     from polymarket_mcp.market_data import get_engine
@@ -1224,7 +1254,7 @@ async def market_data_last_points(source: str, limit: int = 20) -> dict:
     return {"source": source, "points": get_engine().last_points(source, limit)}
 
 
-@mcp.tool()
+@_tool
 async def subscribe_round(slug: str = "", outcome: str = "UP") -> dict:
     """Subscribe to a BTC 5m round by slug (default current) with auto-rollover.
 
@@ -1236,7 +1266,7 @@ async def subscribe_round(slug: str = "", outcome: str = "UP") -> dict:
     return await _subscribe(slug, outcome)
 
 
-@mcp.tool()
+@_tool
 async def stop_round_watch() -> dict:
     """Stop automatic round rollover watching."""
     from polymarket_mcp.round_streams import stop_round_watch as _stop
@@ -1244,7 +1274,7 @@ async def stop_round_watch() -> dict:
     return await _stop()
 
 
-@mcp.tool()
+@_tool
 async def round_status() -> dict:
     """Current/next 5m round boundaries and rollover watcher status."""
     from polymarket_mcp.round_streams import round_status as _status
@@ -1252,7 +1282,7 @@ async def round_status() -> dict:
     return await _status()
 
 
-@mcp.tool()
+@_tool
 async def start_user_stream(markets: list[str] | None = None) -> dict:
     """Subscribe to the authenticated 'user' stream (order + trade events).
 
@@ -1264,7 +1294,7 @@ async def start_user_stream(markets: list[str] | None = None) -> dict:
     return await _start(markets)
 
 
-@mcp.tool()
+@_tool
 async def stop_user_stream() -> dict:
     """Stop the authenticated user stream and close its client."""
     from polymarket_mcp.round_streams import stop_user_stream as _stop
@@ -1272,7 +1302,7 @@ async def stop_user_stream() -> dict:
     return await _stop()
 
 
-@mcp.tool()
+@_tool
 async def user_stream_status() -> dict:
     """User stream running state, buffered event count and last error."""
     from polymarket_mcp.round_streams import user_stream_status as _status
@@ -1280,7 +1310,7 @@ async def user_stream_status() -> dict:
     return await _status()
 
 
-@mcp.tool()
+@_tool
 async def user_stream_events(limit: int = 50) -> dict:
     """Last buffered user order/trade events (newest last)."""
     from polymarket_mcp.round_streams import user_stream_events as _events
@@ -1288,7 +1318,7 @@ async def user_stream_events(limit: int = 50) -> dict:
     return await _events(limit)
 
 
-@mcp.tool()
+@_tool
 async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
     """One-call BTC 5m snapshot: round, PTB, both live books, tape and 5-sh fills.
 
@@ -1373,7 +1403,7 @@ async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
     return result
 
 
-@mcp.tool()
+@_tool
 async def get_btc5m_resolution(window_start: int | None = None, wait_seconds: int = 0) -> dict:
     """Official BTC 5m settlement from Gamma + Data API v2 (read-only, no keys)."""
     from polymarket_mcp.resolution import get_btc5m_resolution as _get
@@ -1381,7 +1411,7 @@ async def get_btc5m_resolution(window_start: int | None = None, wait_seconds: in
     return await _get(window_start, wait_seconds)
 
 
-@mcp.tool()
+@_tool
 async def get_recent_btc5m_resolutions(count: int = 3) -> dict:
     """Official settlement rows for the last N completed BTC 5m windows (1-12)."""
     from polymarket_mcp.resolution import get_recent_btc5m_resolutions as _get

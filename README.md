@@ -141,6 +141,20 @@ Hmm: `${...}` interpolation in Hermes' YAML — verify it resolves your OS env
 is an example starting point, **not** an instruction to edit Hermes config;
 this repo does not touch `~/.hermes/config.yaml`.
 
+## Autonomous mode (server-side)
+
+Set `POLY_AUTONOMOUS=1` in the agent's MCP process environment (default `0`).
+Restart the process to apply changes. The server registers only a built-in
+set of data/preview tools and forces both order tools into DRY-RUN, even if
+`POLY_ALLOW_LIVE=1` and the caller sends `confirm=true`. Cancellation,
+approvals, credential tools, and authenticated account tools are never
+registered in autonomous mode. Keep `POLY_ALLOW_LIVE=0` as well.
+
+`POLY_AUTONOMOUS_TOOLS` can narrow the built-in set to comma-separated exact
+names. Unset means the full built-in set; an explicitly empty list registers
+no tools. Example: `POLY_AUTONOMOUS_TOOLS=guard_status,get_btc5m_snapshot,preview_buy_depth`.
+Listing a privileged tool here does not make it available.
+
 ## BUY depth preview and live-order gate
 
 Keep `POLY_ALLOW_LIVE=0` (the default) for agent use. The order tools

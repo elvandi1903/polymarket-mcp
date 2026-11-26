@@ -296,6 +296,17 @@ def test_mcp_stdio_no_sentinel_on_all_tools():
     assert len(outs) == len(calls)
 
 
+def test_autonomous_filters_tools_at_mcp_boundary():
+    env = {**_env_with_sentinels(), "POLY_AUTONOMOUS": "1",
+           "POLY_AUTONOMOUS_TOOLS": "guard_status,cancel_all_orders"}
+    allowed, denied, unlisted = map(json.loads, _run_stdio(env, [
+        ("guard_status", {}), ("cancel_all_orders", {"confirm": True}), ("search_markets", {"q": "BTC"}),
+    ]))
+    assert not allowed["result"].get("isError")
+    for result in (denied, unlisted):
+        assert "error" in result or result["result"].get("isError")
+
+
 def test_guard_status_over_real_stdio(tmp_path):
     state_dir = tmp_path / "guard"
     env = {**_env_with_sentinels(), "POLY_GUARD_STATE_DIR": str(state_dir), "POLY_ALLOW_LIVE": "0"}
