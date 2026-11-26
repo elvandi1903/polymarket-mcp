@@ -195,6 +195,19 @@ interrupted outcomes also stay charged. SDK 0.20.1 does not expose `INVALID`
 as a typed rejection, so ambiguous errors are not treated as no-fill. The BUY
 execution path is disabled; these tools do not create live reservations.
 
+## BUY readiness diagnostics
+
+`check_buy_readiness()` is an operator-only diagnostic, not an approval. It
+checks the current BTC 5m round for a captured PTB, a recent valid TWAP data
+point (not a WebSocket heartbeat), both outcome books with fresh asks, a
+market explicitly accepting orders, and an account explicitly not in
+closed-only mode. A rollover during the checks returns `round_changed`.
+The closed-only check needs existing CLOB credentials; it does not derive
+replacements. `POLY_MAX_PTB_AGE_S` is a positive finite number in the process
+environment (default `10`, example `POLY_MAX_PTB_AGE_S=5`). Book receipt age
+uses `POLY_LIVE_FRESH_MS` (default `2000`). A passing result always has
+`live_buy_allowed: false`: no BUY execution or budget reservation is enabled.
+
 ## Guard audit and watchdog
 
 The server appends guard decisions and SDK submission outcomes to

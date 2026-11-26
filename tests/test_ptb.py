@@ -111,6 +111,29 @@ def _twap_msg(ts_ms, value, *, snapshot=False):
     })
 
 
+def test_twap_freshness_uses_data_timestamp_not_controls_or_replays(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from polymarket_mcp import ptb
+
+    start = 1794029100
+    monkeypatch.setattr(ptb, "time", SimpleNamespace(time=lambda: start + 5))
+    feed = PtbFeed(Settings())
+    feed.store = PtbStore(str(tmp_path / "ptb.jsonl"))
+
+    async def check():
+        await feed._handle_text(json.dumps({"op": "pong"}))
+        assert feed.last_twap_at == 0
+        await feed._handle_text(_twap_msg((start + 1) * 1000, "61000"))
+        assert feed.last_twap_at == start + 1
+        await feed._handle_text(_twap_msg(start * 1000, "61000", snapshot=True))
+        await feed._handle_text(_twap_msg((start + 4) * 1000, "NaN"))
+        await feed._handle_text(_twap_msg((start + 10) * 1000, "61000"))
+        assert feed.last_twap_at == start + 1
+
+    asyncio.run(check())
+
+
 def test_close_point_captured_and_settled():
     feed = PtbFeed(Settings(private_key="0x" + "11" * 32, wallet="0x6Cd089333445c89b55B7693c6009DCc229613738"))
     feed.store = PtbStore(os.path.join(tempfile.mkdtemp(), "ptb-close-gap.jsonl"))

@@ -330,6 +330,7 @@ class PtbFeed:
         self._task: asyncio.Task | None = None
         self._ws: Any = None
         self._last_msg_at: float = 0.0
+        self.last_twap_at: float = 0.0
         self._dropped: int = 0
         self._seq_gaps: int = 0
         self._connected_at: float = 0.0
@@ -363,6 +364,7 @@ class PtbFeed:
                             self._ws = ws
                             self._connected_at = time.time()
                             self._last_msg_at = time.time()
+                            self.last_twap_at = 0.0
                             attempt = 0
                             # 1) auth (required for price.crypto.twap)
                             await ws.send_json({
@@ -391,13 +393,15 @@ class PtbFeed:
                                     raise ConnectionError(str(msg.data))
                     except WSHandshakeError as hs:
                         raise ConnectionError(str(hs))
+                    finally:
+                        self.last_twap_at = 0.0
             except asyncio.CancelledError:
                 raise
-            except PermissionError as exc:
+            except PermissionError:
                 self._running = False
                 if self.last_error is None:
                     self.auth_failed = True
-                    self.last_error = str(exc)
+                    self.last_error = "permission_error"
                 self.log.error("ptb feed stopped: %s", self.last_error)
             except Exception as exc:
                 delay = next_backoff(exc, attempt)
@@ -415,7 +419,6 @@ class PtbFeed:
             self._last_msg_at = time.time()
             return
         if obj.get("op") == "error":
-            self.log.warning("polybolt error: %s", obj)
             code = obj.get("code")
             if code in ("auth_failed", "auth_invalid", "auth_required"):
                 self.auth_failed = True
@@ -444,6 +447,8 @@ class PtbFeed:
                 except Exception:
                     self._dropped += 1
                     continue
+                if pt.value.is_finite() and pt.value > 0 and pt.timestamp.timestamp() <= now:
+                    self.last_twap_at = max(self.last_twap_at, pt.timestamp.timestamp())
                 self._pending_points.append(pt)
                 self._maybe_capture(pt, snapshot=snapshot, received_at=now)
             self._last_msg_at = now

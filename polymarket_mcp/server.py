@@ -26,7 +26,9 @@ import asyncio
 import decimal
 import hmac
 import ipaddress
+import math
 import os
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -1090,6 +1092,83 @@ async def check_closed_only_mode() -> dict:
         return {"closed_only_mode": await client.get_closed_only_mode()}
     finally:
         await client.close()
+
+
+@_tool
+@observability.audit_tool
+async def check_buy_readiness() -> dict:
+    """Check the current BTC 5m BUY prerequisites without authorizing an order."""
+    from . import live, ptb
+    from .resolution import window_bounds
+
+    start, _, slug = window_bounds(int(time.time()) // 300 * 300)
+    reasons: list[str] = []
+    try:
+        max_age = float(os.getenv("POLY_MAX_PTB_AGE_S", "10"))
+        if not math.isfinite(max_age) or max_age <= 0:
+            raise ValueError
+    except ValueError:
+        reasons.append("invalid_POLY_MAX_PTB_AGE_S")
+        max_age = None
+
+    assets: dict[str, str] = {}
+    try:
+        pub = clientmod.build_public_client()
+        try:
+            market = await pub.get_market(slug=slug)
+        finally:
+            await pub.close()
+        if market.slug != slug:
+            reasons.append("market_round_mismatch")
+        else:
+            if market.state.accepting_orders is not True:
+                reasons.append("market_not_accepting_orders")
+            assets = {side: _resolve_asset_id(market, side)[0] for side in ("UP", "DOWN")}
+            if assets["UP"] == assets["DOWN"]:
+                reasons.append("market_assets_not_distinct")
+    except Exception:
+        reasons.append("market_unverified")
+
+    try:
+        account = await clientmod.build_readonly_account_client(_settings())
+        try:
+            closed_only = await account.get_closed_only_mode()
+        finally:
+            await account.close()
+        if closed_only is True:
+            reasons.append("closed_only")
+        elif closed_only is not False:
+            reasons.append("closed_only_unverified")
+    except Exception:
+        reasons.append("closed_only_unverified")
+
+    now = time.time()
+    if int(now) // 300 * 300 != start:
+        observability.decision("readiness_blocked")
+        return {"window_start": start, "prerequisites_met": False,
+                "reasons": ["round_changed"], "live_buy_allowed": False}
+    feed = ptb._FEED
+    record = feed.captured(start) if feed is not None else None
+    if record is None or record.status != "captured" or record.ptb is None or not record.ptb.is_finite() or record.ptb <= 0:
+        reasons.append("ptb_not_captured")
+    elif max_age is not None and (
+        not feed._running or feed.auth_failed or feed.last_twap_at < start
+        or not 0 <= now - feed.last_twap_at <= max_age
+    ):
+        reasons.append("ptb_stale")
+
+    manager = live.get_manager()
+    now_ms = int(now * 1000)
+    for side, asset_id in assets.items():
+        stream = manager.get_state(asset_id)
+        if stream is None or not stream.book or not stream.book.get("asks"):
+            reasons.append(f"book_{side}_missing")
+        elif not stream.book_received_at_ms or not 0 <= stream.book_age_ms(now_ms) <= manager.cfg["fresh_ms"]:
+            reasons.append(f"book_{side}_stale")
+
+    observability.decision("readiness_blocked" if reasons else "readiness_met_live_buy_disabled")
+    return {"window_start": start, "prerequisites_met": not reasons,
+            "reasons": reasons, "live_buy_allowed": False}
 
 
 # ----------------------------------------------------------------- PTB FEED --
