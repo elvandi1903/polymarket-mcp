@@ -105,6 +105,7 @@ cp .env.example .env   # then fill on YOUR machine; never commit it
 | `POLY_ALLOW_LIVE` | `1` arms live mode; keep `0` for DRY-RUN |
 | `POLY_MAX_NOTIONAL` | Per-order USD cap (0 = unset) — set this |
 | `POLY_MAX_OPEN_ORDERS` | Open-order cap (0 = unset) |
+| `POLY_GUARD_STATE_DIR` | Process environment only. Private local state directory; defaults to `~/.local/state/polymarket-mcp`. Example: `POLY_GUARD_STATE_DIR="$HOME/.local/state/polymarket-agent"`. |
 | `POLY_NONCE` | Derivation nonce if your API key used one |
 
 Preflight before anything else: call `account_preflight` and confirm
@@ -164,6 +165,37 @@ This deployment does not have a verified execution path that enforces both
 the share cap and the all-in cap. Existing DRY-RUN order previews and BTC
 snapshot estimates are unchanged; use `preview_buy_depth` for the capped
 book-depth calculation.
+
+## Guard audit and watchdog
+
+The server appends guard decisions and SDK submission outcomes to
+`guard-audit.jsonl` in `POLY_GUARD_STATE_DIR`. Each record contains a Unix
+timestamp, server-generated request ID, tool name, event and outcome; batch
+outcomes also include a zero-based response index. Tool arguments, wallet
+and order IDs, credentials, signatures, raw SDK responses and exception
+messages are not recorded. Covered tools are `preview_buy_depth`,
+`preview_order`, `place_market_order`, `place_batch_order`, `cancel_order`,
+`cancel_all_orders`, and `setup_trading_approvals`.
+
+`guard_status` returns the last 10 decisions from the current process
+(oldest first) plus audit and heartbeat health and failure counts. The JSONL
+file persists across restarts; the status history does not. Audit failure
+leaves DRY-RUN responses unchanged but refuses audited live operations before
+SDK submission. After invoking the SDK, an audit failure does not replace
+its response or trigger another submission. `unknown` is not proof of no
+fill, and `submit_started` without a recorded result requires investigation,
+not a retry.
+
+The CLI atomically replaces `guard-heartbeat.json` at startup and every 10
+seconds while its event loop runs. The file contains `pid` and Unix
+`timestamp`. Use a dedicated state directory per server process. A watchdog
+should check the expected PID and treat a missing or stale heartbeat as
+unhealthy (for example, older than 30 seconds). The last file stays in place
+when the process stops; a fresh heartbeat does not attest to exchange or
+upstream feed health. New state directories and files use modes `0700` and
+`0600`; use a private directory on a local filesystem. The server does not
+rotate or truncate the audit log; monitor disk use and archive it externally
+when the server is stopped.
 
 ## Testing (offline, no funds)
 

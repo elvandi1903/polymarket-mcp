@@ -22,6 +22,7 @@ confirm=true), and only after the Proxy-Wallet preflight passes.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import decimal
 from typing import Any
 
@@ -35,7 +36,7 @@ except ImportError:
     _MCP_V2 = False
 
 from . import client as clientmod
-from . import safety
+from . import observability, safety
 from .config import Settings
 
 INSTRUCTIONS = (
@@ -387,6 +388,7 @@ async def _resolve_market(slug_or_id: str, outcome: str):
 
 
 @mcp.tool()
+@observability.audit_tool
 async def place_market_order(
     market: str,
     outcome: str,
@@ -423,6 +425,7 @@ async def place_market_order(
         raise safety.ValidationError("SELL market order requires shares")
     gate = safety.gate_result(st, confirm)
     if gate["live"] and s == "BUY":
+        observability.decision("live_buy_blocked")
         safety.reject_live_buy()
     cap = amt if amt is not None else (mspend if mspend is not None else Decimal(0))
     safety.check_notional(st, cap)
@@ -439,12 +442,13 @@ async def place_market_order(
             max_price=mxp, min_price=mnp, order_type=ot, expiration=None,
             post_only=False, gate=gate, market_constraints=constraints_full)
 
+    observability.decision("allowed")
     client = await clientmod.build_secure_client(st)
     try:
         from polymarket_mcp.server import _to_jsonable
 
-        resp = await client.place_market_order(
-            asset_id=asset_id, side=s, amount=amt, shares=shr,
+        resp = await observability.submit(
+            client.place_market_order, asset_id=asset_id, side=s, amount=amt, shares=shr,
             max_spend=mspend, max_price=mxp, min_price=mnp,
             order_type=ot, builder_code=st.builder_code or None)
         return _to_jsonable(resp)
@@ -453,37 +457,48 @@ async def place_market_order(
 
 
 @mcp.tool()
+async def guard_status() -> dict:
+    """Show recent guard decisions and local audit/heartbeat health."""
+    return observability.state.status()
+
+
+@mcp.tool()
+@observability.audit_tool
 async def cancel_order(order_id: str, confirm: bool = False) -> dict:
     """Cancel one order. DRY-RUN unless POLY_ALLOW_LIVE=1 AND confirm=true."""
     gate = safety.gate_result(_settings(), confirm)
     if gate["mode"] == "DRY_RUN":
         return {"status": "DRY_RUN", "action": "cancel_order", "order_id": order_id,
                 "gate": gate, "note": "Nothing cancelled. POLY_ALLOW_LIVE=1 AND confirm=true required."}
+    observability.decision("allowed")
     client = await clientmod.build_secure_client(_settings())
     try:
         from polymarket_mcp.server import _to_jsonable
 
-        return _to_jsonable(await client.cancel_order(order_id=order_id))
+        return _to_jsonable(await observability.submit(client.cancel_order, order_id=order_id))
     finally:
         await client.close()
 
 
 @mcp.tool()
+@observability.audit_tool
 async def cancel_all_orders(confirm: bool = False) -> dict:
     gate = safety.gate_result(_settings(), confirm)
     if gate["mode"] == "DRY_RUN":
         return {"status": "DRY_RUN", "action": "cancel_all", "gate": gate,
                 "note": "Nothing cancelled. POLY_ALLOW_LIVE=1 AND confirm=true required."}
+    observability.decision("allowed")
     client = await clientmod.build_secure_client(_settings())
     try:
         from polymarket_mcp.server import _to_jsonable
 
-        return _to_jsonable(await client.cancel_all())
+        return _to_jsonable(await observability.submit(client.cancel_all))
     finally:
         await client.close()
 
 
 @mcp.tool()
+@observability.audit_tool
 async def setup_trading_approvals(confirm: bool = False) -> dict:
     """Request pUSD + conditional-token exchange allowances. State-changing.
 
@@ -496,11 +511,12 @@ async def setup_trading_approvals(confirm: bool = False) -> dict:
         return {"status": "DRY_RUN", "action": "setup_trading_approvals", "gate": gate,
                 "note": "DRY-RUN; nothing submitted. Neg-Risk Adapter is NOT covered by "
                         "setup_trading_approvals; check neg_risk per market and approvals state."}
+    observability.decision("allowed")
     client = await clientmod.build_secure_client(_settings())
     try:
         from polymarket_mcp.server import _to_jsonable
 
-        handle = await client.setup_trading_approvals()
+        handle = await observability.submit(client.setup_trading_approvals)
         return {"status": "submitted", "handle": _to_jsonable(handle)}
     finally:
         await client.close()
@@ -773,6 +789,7 @@ async def revoke_api_credentials(rotate: bool = False, new_nonce: int = 0) -> di
 
 # -------------------------------------------------------------- ORDER OPS --
 @mcp.tool()
+@observability.audit_tool
 async def preview_buy_depth(market: str, outcome: str) -> dict:
     """Estimate up to 5 shares at $0.72/share or less from public asks. No order."""
     o = safety.validate_outcome(outcome)
@@ -821,6 +838,7 @@ async def preview_buy_depth(market: str, outcome: str) -> dict:
 
 
 @mcp.tool()
+@observability.audit_tool
 async def preview_order(
     market: str,
     outcome: str,
@@ -890,6 +908,7 @@ async def track_order(order_id: str, timeout_s: float = 10.0) -> dict:
 
 
 @mcp.tool()
+@observability.audit_tool
 async def place_batch_order(
     orders_json: str,
     confirm: bool = False,
@@ -921,6 +940,7 @@ async def place_batch_order(
             if not isinstance(req, dict):
                 raise safety.ValidationError("each order must be a JSON object")
             if safety.validate_side(req.get("side", "")) == "BUY":
+                observability.decision("live_buy_blocked")
                 safety.reject_live_buy()
     batch = []
     for req in reqs:
@@ -966,6 +986,7 @@ async def place_batch_order(
     if gate["mode"] == "DRY_RUN":
         return {"status": "DRY_RUN", "gate": gate, "orders": previews}
 
+    observability.decision("allowed")
     client = await clientmod.build_secure_client(st)
     try:
         from polymarket_mcp.server import _to_jsonable
@@ -983,7 +1004,7 @@ async def place_batch_order(
                     order_type=req.get("order_type", "FAK"),
                     builder_code=st.builder_code or None,
                 ))
-        resp = await client.post_orders(signed)
+        resp = await observability.submit(client.post_orders, signed)
         return {"status": "LIVE", "gate": gate, "response": _to_jsonable(resp)}
     finally:
         await client.close()
@@ -1393,17 +1414,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if _MCP_V2:
+        kwargs: dict[str, Any] = {}
         if args.transport in ("streamable-http", "sse"):
-            kwargs: dict[str, Any] = {
-                "host": args.host,
-                "port": args.port,
-                "transport_security": _transport_security(args.host),
-            }
-            if args.transport == "streamable-http":
-                kwargs["streamable_http_path"] = args.path
-            mcp.run(transport=args.transport, **kwargs)
-        else:
-            mcp.run(transport="stdio")
+            kwargs.update(host=args.host, port=args.port, transport_security=_transport_security(args.host))
+        if args.transport == "streamable-http":
+            kwargs["streamable_http_path"] = args.path
+        asyncio.run(observability.run_with_heartbeat(_transport_runner(args.transport), **kwargs))
         return
 
     if args.transport in ("streamable-http", "sse"):
@@ -1422,7 +1438,15 @@ def main(argv: list[str] | None = None) -> None:
                 allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
                 allowed_origins=["*"],
             )
-    mcp.run(transport=args.transport)
+    asyncio.run(observability.run_with_heartbeat(_transport_runner(args.transport)))
+
+
+def _transport_runner(transport: str):
+    if transport == "streamable-http":
+        return mcp.run_streamable_http_async
+    if transport == "sse":
+        return mcp.run_sse_async
+    return mcp.run_stdio_async
 
 
 if __name__ == "__main__":

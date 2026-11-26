@@ -296,6 +296,24 @@ def test_mcp_stdio_no_sentinel_on_all_tools():
     assert len(outs) == len(calls)
 
 
+def test_guard_status_over_real_stdio(tmp_path):
+    state_dir = tmp_path / "guard"
+    env = {**_env_with_sentinels(), "POLY_GUARD_STATE_DIR": str(state_dir), "POLY_ALLOW_LIVE": "0"}
+    order_id = "AUDIT_ORDER_ID_SENTINEL"
+    cancel, status = _run_stdio(env, [("cancel_order", {"order_id": order_id}), ("guard_status", {})])
+    assert "DRY_RUN" in cancel
+    result = json.loads(status)["result"]
+    assert not result.get("isError")
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["heartbeat"]["ok"] is True
+    assert payload["recent_decisions"][0]["tool"] == "cancel_order"
+    assert payload["recent_decisions"][0]["outcome"] == "dry_run"
+    for value in (status, (state_dir / "guard-audit.jsonl").read_text(),
+                  (state_dir / "guard-heartbeat.json").read_text()):
+        _no_sentinel(value, "guard observability")
+        assert order_id not in value
+
+
 def test_env_example_has_no_values():
     text = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
     for line in text.splitlines():
