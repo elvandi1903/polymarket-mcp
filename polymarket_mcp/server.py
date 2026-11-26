@@ -557,6 +557,9 @@ async def get_live_top_of_book(asset_id: str) -> dict:
     if st is None:
         st = await manager.subscribe(asset_id)
     snap = st.snapshot_dict()
+    if snap.get("book_snapshot") is None:
+        await manager._rest_fallback(st)
+        snap = st.snapshot_dict()
     book = snap.get("book_snapshot") or {}
     bbo = snap.get("best_bid_ask") or {}
     def epoch_ms(value):
@@ -1265,8 +1268,20 @@ async def get_btc5m_snapshot(tape_limit: int = 10) -> dict:
             result["errors"].append(f"book.{side}:{type(exc).__name__}")
             result["books"][side] = {"asset_id": asset_id, "status": "error"}
         try:
+            ask = result["books"][side].get("ask")
+            if ask is None:
+                result["errors"].append(f"fill.{side}:NoAsk")
+                result["fills"][side] = {"asset_id": asset_id, "estimated_price": None}
+                continue
+            best_ask = decimal.Decimal(str(ask))
+            tick = decimal.Decimal(str(result["books"][side].get("tick_size")))
+            if tick <= 0:
+                raise decimal.InvalidOperation
+            amount = ((decimal.Decimal("5") * best_ask / tick).to_integral_value(
+                rounding=decimal.ROUND_CEILING
+            ) * tick)
             result["fills"][side] = await estimate_market_price(
-                asset_id, "BUY", shares="5",
+                asset_id, "BUY", amount=str(amount),
             )
         except Exception as exc:
             result["errors"].append(f"fill.{side}:{type(exc).__name__}")

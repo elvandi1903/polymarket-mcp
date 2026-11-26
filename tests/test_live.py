@@ -184,6 +184,32 @@ def test_live_top_of_book_reports_book_receipt_and_fresh_book_levels(monkeypatch
     assert out["ask"] == "0.99"
 
 
+def test_live_top_of_book_bootstraps_cold_subscription_from_rest(monkeypatch):
+    from polymarket_mcp import live as livemod
+    from polymarket_mcp.server import get_live_top_of_book
+
+    m = LiveBookManager()
+    st = AssetStream(asset_id="A1")
+
+    async def subscribe(asset_id):
+        m._streams[asset_id] = st
+        return st
+
+    async def rest_fallback(state):
+        state.apply_book(_book(0.60, 2000), local_now_ms=2000, source="clob_rest_snapshot")
+
+    monkeypatch.setattr(m, "subscribe", subscribe)
+    monkeypatch.setattr(m, "_rest_fallback", rest_fallback)
+    monkeypatch.setattr(livemod, "get_manager", lambda: m)
+
+    out = asyncio.run(get_live_top_of_book("A1"))
+
+    assert out["bid"] == "0.6"
+    assert out["ask"] == "0.99"
+    assert out["tick_size"] == "0.01"
+    assert out["source"] == "clob_rest_snapshot"
+
+
 def test_midpoint_matches_book():
     """get_live_book midpoint should agree with REST midpoint logic."""
     from decimal import Decimal
