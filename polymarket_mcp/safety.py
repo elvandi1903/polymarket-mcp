@@ -17,6 +17,8 @@ from .config import Settings
 MAX_BUY_SHARES = Decimal(5)
 MAX_BUY_PRICE = Decimal("0.72")
 MAX_BUY_SPEND = Decimal(5)
+# At this floor a 1.00 USD entry cannot exceed MAX_BUY_SHARES shares.
+MIN_BUY_ASK = Decimal("0.20")
 
 
 class ValidationError(RuntimeError):
@@ -61,14 +63,6 @@ def check_notional(settings: Settings, amount: Decimal) -> None:
     if settings.max_notional > 0 and amount > settings.max_notional:
         raise ValidationError(
             f"Amount {amount} exceeds POLY_MAX_NOTIONAL cap {settings.max_notional}"
-        )
-
-
-def check_open_orders(settings: Settings, open_count: int) -> None:
-    if settings.max_open_orders > 0 and open_count >= settings.max_open_orders:
-        raise ValidationError(
-            f"Already at the POLY_MAX_OPEN_ORDERS cap ({settings.max_open_orders}); "
-            f"{open_count} open orders"
         )
 
 

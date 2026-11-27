@@ -30,7 +30,6 @@ async def main() -> int:
     print("has_api_creds:", s.has_api_creds)
     print("allow_live:", s.allow_live)
     print("max_notional:", s.max_notional)
-    print("max_open_orders:", s.max_open_orders)
 
     # 1. Klasifikasi wallet offline (tanpa network)
     try:

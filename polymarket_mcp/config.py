@@ -76,7 +76,6 @@ class Settings:
     relayer_address: str = ""
     allow_live: bool = False              # server-side live switch
     max_notional: Decimal = Decimal(0)  # 0 = unset
-    max_open_orders: int = 0              # 0 = unset
     nonce: int = 0
 
     @classmethod
@@ -96,7 +95,6 @@ class Settings:
             relayer_address=_env("RELAYER_API_KEY_ADDRESS"),
             allow_live=_env("POLY_ALLOW_LIVE", "0") in ("1", "true", "True", "TRUE"),
             max_notional=_decimal_or_zero(_env("POLY_MAX_NOTIONAL"), "POLY_MAX_NOTIONAL"),
-            max_open_orders=int(_env("POLY_MAX_OPEN_ORDERS", "0") or "0"),
             nonce=nonce,
         )
 
@@ -118,6 +116,5 @@ class Settings:
             "builder_code_set": bool(self.builder_code),
             "allow_live": self.allow_live,
             "max_notional": str(self.max_notional),
-            "max_open_orders": self.max_open_orders,
             "nonce": self.nonce,
         }
