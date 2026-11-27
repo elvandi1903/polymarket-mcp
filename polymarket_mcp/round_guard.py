@@ -21,7 +21,19 @@ _COLUMNS = {
     "notional": "TEXT NOT NULL DEFAULT ''",
     "submitted": "INTEGER NOT NULL DEFAULT 0",
     "created_at": "REAL NOT NULL DEFAULT 0",
+    "making": "TEXT NOT NULL DEFAULT ''",
+    "taking": "TEXT NOT NULL DEFAULT ''",
+    "price": "TEXT NOT NULL DEFAULT ''",
+    "trade_ids": "INTEGER NOT NULL DEFAULT 0",
 }
+
+# Rejection codes that are defined as "this order matched nothing".
+# `unknown` is deliberately excluded: it must not be reclassified from text.
+_NO_FILL_CODES = frozenset({
+    "unmatched", "not_enough_balance", "fak_not_filled", "fok_not_filled",
+    "market_not_ready", "invalid_nonce", "invalid_expiration",
+    "post_only_mode", "post_only_would_cross",
+})
 
 
 class BuyLedger:
@@ -50,14 +62,20 @@ class BuyLedger:
         db.execute("CREATE TABLE IF NOT EXISTS claims (round INTEGER PRIMARY KEY, "
                    "day INTEGER NOT NULL, amount TEXT NOT NULL, status TEXT NOT NULL)")
         existing = {row[1] for row in db.execute("PRAGMA table_info(claims)")}
+        migrated = False
         for name, decl in _COLUMNS.items():
             if name not in existing:
                 try:
                     db.execute(f"ALTER TABLE claims ADD COLUMN {name} {decl}")
+                    migrated = True
                 except sqlite3.OperationalError as exc:
                     # A concurrent writer may have added it between PRAGMA and ALTER.
                     if "duplicate column" not in str(exc):
                         raise
+        if migrated:
+            # Older rows stored the agent's raw wording; canonicalise to UP/DOWN.
+            db.execute("UPDATE claims SET outcome = 'UP' WHERE UPPER(outcome) = 'YES'")
+            db.execute("UPDATE claims SET outcome = 'DOWN' WHERE UPPER(outcome) = 'NO'")
         db.commit()
         return db
 
@@ -102,17 +120,35 @@ class BuyLedger:
                        (window_start,))
 
     def finish(self, window_start: int, response: AcceptedOrder | RejectedOrder | None) -> None:
-        # SDK 0.20.1 does not expose INVALID as a typed rejection and does not
-        # document whether an accepted FAK response was fully or partially
-        # filled, so an accepted order stays "unknown" until the operator
-        # reconciles it. Only an explicit no-fill rejection releases budget.
+        """Record the venue's answer without inventing fill information.
+
+        Accepted + ``matched`` + ``taking_amount > 0`` is a fill (possibly
+        partial, and then recorded with the actual amounts). Everything the
+        SDK does not define — ``live``/``delayed``, a zero taking amount, an
+        unrecognised code, no response — stays ``unknown``.
+        """
         status = "unknown"
-        if isinstance(response, RejectedOrder) and response.code in ("unmatched", "not_enough_balance"):
-            status = "no_fill"
+        making = taking = price = ""
+        trade_ids = 0
+        if isinstance(response, RejectedOrder):
+            if response.code in _NO_FILL_CODES:
+                status = "no_fill"
+        elif isinstance(response, AcceptedOrder):
+            making, taking = str(response.making_amount), str(response.taking_amount)
+            trade_ids = len(response.trade_ids)
+            if response.status == "matched" and response.taking_amount > 0:
+                status = "matched"
+            # For a BUY the SDK derives the order price as maker/taker.
+            try:
+                if Decimal(making) > 0 and Decimal(taking) > 0:
+                    price = str(Decimal(making) / Decimal(taking))
+            except (ArithmeticError, TypeError, ValueError):
+                price = ""
         with closing(self._connect()) as db, db:
             cursor = db.execute(
-                "UPDATE claims SET status = ? WHERE round = ? AND status = 'pending'",
-                (status, window_start))
+                "UPDATE claims SET status = ?, making = ?, taking = ?, price = ?, trade_ids = ? "
+                "WHERE round = ? AND status = 'pending'",
+                (status, making, taking, price, trade_ids, window_start))
             if cursor.rowcount != 1:
                 raise safety.ValidationError("BUY claim missing or already finalized")
 
@@ -139,15 +175,34 @@ class BuyLedger:
             return None
         return "unknown" if row[0] == "pending" else row[0]
 
-    def unreconciled(self, limit: int = 12) -> list[int]:
+    def unreconciled(self, *, now: int | None = None, rounds: int = 12) -> list[int]:
+        """Unresolved claims that may still block a BUY.
+
+        With ``now`` given, only the last ``rounds`` rounds count; older
+        unknowns stay visible via ``unknown_rounds`` but never block.
+        """
+        try:
+            self._check_file()
+        except FileNotFoundError:
+            return []
+        floor = None if now is None else (int(now) // 300) * 300 - rounds * 300
+        query = ("SELECT round FROM claims WHERE status IN ('pending', 'unknown')"
+                 + (" AND round >= ?" if floor is not None else "")
+                 + " ORDER BY round DESC")
+        params: tuple = () if floor is None else (floor,)
+        with closing(self._connect()) as db:
+            rows = db.execute(query, params).fetchall()
+        return [row[0] for row in rows]
+
+    def unknown_rounds(self) -> list[int]:
+        """Every unresolved round, for operator visibility."""
         try:
             self._check_file()
         except FileNotFoundError:
             return []
         with closing(self._connect()) as db:
-            rows = db.execute(
-                "SELECT round FROM claims WHERE status IN ('pending', 'unknown') "
-                "ORDER BY round DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute("SELECT round FROM claims WHERE status IN ('pending', 'unknown') "
+                              "ORDER BY round DESC").fetchall()
         return [row[0] for row in rows]
 
     def rows_for_day(self, day: int) -> list[dict]:
@@ -177,26 +232,31 @@ def day_of(now: float) -> int:
 
 def loss_report(rows: list[dict], resolutions: dict[int, str | None], *,
                 max_daily_loss: Decimal, max_consecutive_losses: int) -> dict:
-    """Conservative PnL: a loss is charged in full, a win is never credited.
+    """Conservative PnL: a loss is charged, a win is never credited.
 
     ``resolutions`` maps window_start -> winning side ("UP"/"DOWN"/None).
-    Rows without a known result are skipped, not guessed.
+    Rows without a known result are skipped, not guessed. The charge uses the
+    recorded spend (``making``) when present, otherwise the full notional.
     """
     losses = Decimal(0)
     streak = 0
     counted = 0
     for row in sorted(rows, key=lambda r: r["round"], reverse=True):
         winner = resolutions.get(row["round"])
-        if row["status"] not in ("matched", "no_fill") or winner is None:
+        status = row["status"]
+        if status not in ("matched", "no_fill", "unknown"):
+            continue
+        if winner is None:
             continue
         counted += 1
-        if row["status"] == "no_fill":
+        if status == "no_fill":
             streak = 0
             continue
-        if row.get("outcome", "").upper() == winner.upper():
+        if status == "matched" and row.get("outcome", "").upper() == winner.upper():
             streak = 0
             continue
-        amount = Decimal(str(row.get("notional") or row["amount"]))
+        # A loss, or an unresolved claim whose round resolved: charge it fully.
+        amount = Decimal(str(row.get("making") or row.get("notional") or row["amount"]))
         losses += amount
         streak += 1
     reasons = []

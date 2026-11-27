@@ -154,7 +154,25 @@ _AUTONOMOUS_SAFE_TOOLS = frozenset({
 
 
 _AUTONOMOUS_AT_START = os.getenv("POLY_AUTONOMOUS", "0").strip() != "0"
-_LIVE_BUY_AT_START = os.getenv("POLY_AUTONOMOUS_LIVE_BUY", "0").strip() == "1"
+_LIVE_BUY_REQUESTED = os.getenv("POLY_AUTONOMOUS_LIVE_BUY", "0").strip() == "1"
+_AUTONOMOUS_TOOLS_AT_START = os.getenv("POLY_AUTONOMOUS_TOOLS")
+
+
+def _live_buy_registrable() -> bool:
+    """The BUY tool needs autonomous mode too, and any explicit allowlist.
+
+    Without this, enabling live BUY alone would also expose cancel/credential
+    tools whenever POLY_AUTONOMOUS is off.
+    """
+    if not (_LIVE_BUY_REQUESTED and _AUTONOMOUS_AT_START):
+        return False
+    if _AUTONOMOUS_TOOLS_AT_START is None:
+        return True
+    listed = {item.strip() for item in _AUTONOMOUS_TOOLS_AT_START.split(",")}
+    return "place_btc5m_buy" in listed
+
+
+_LIVE_BUY_AT_START = _live_buy_registrable()
 if _LIVE_BUY_AT_START:
     _AUTONOMOUS_SAFE_TOOLS = _AUTONOMOUS_SAFE_TOOLS | {"place_btc5m_buy"}
 
@@ -535,6 +553,14 @@ async def guard_status() -> dict:
     status = observability.state.status()
     status["halt"] = halt.read()
     status["live_buy_tool_registered"] = _LIVE_BUY_AT_START
+    try:
+        ledger = _buy_ledger()
+        status["ledger"] = {
+            "unknown_rounds": ledger.unknown_rounds(),
+            "blocking_unknown": ledger.unreconciled(now=int(time.time())),
+        }
+    except (OSError, RuntimeError, ValueError):
+        status["ledger"] = {"error": "unreadable"}
     return status
 
 
@@ -1211,14 +1237,29 @@ def _buy_reject(code: str, message: str, *, slug: str, outcome: str) -> dict:
             "code": code, "message": message}
 
 
+_RESOLUTION_CACHE: dict[int, tuple[str | None, float]] = {}
+_RESOLUTION_PENDING_TTL_S = 60.0
+
+
 async def _resolution_winner(window_start: int) -> str | None:
+    """Winner of a round, cached per process.
+
+    A resolved winner is final and cached forever. A pending lookup is cached
+    briefly so repeated BUY attempts in one round do not re-hit the network.
+    """
+    cached = _RESOLUTION_CACHE.get(window_start)
+    if cached is not None:
+        winner, at = cached
+        if winner is not None or time.time() - at < _RESOLUTION_PENDING_TTL_S:
+            return winner
     from .resolution import get_btc5m_resolution
 
     payload = await get_btc5m_resolution(window_start)
-    if payload.get("state") != "resolved":
-        return None
-    winner = (payload.get("winner") or "").upper()
-    return winner or None
+    winner = None
+    if payload.get("state") == "resolved":
+        winner = (payload.get("winner") or "").upper() or None
+    _RESOLUTION_CACHE[window_start] = (winner, time.time())
+    return winner
 
 
 @observability.audit_tool
@@ -1296,8 +1337,8 @@ async def place_btc5m_buy(outcome: str, max_price: str) -> dict:
                            slug=slug, outcome=outcome)
     send_limit = min(limit, ceiling)
 
-    # (h) no unreconciled claims
-    pending = _buy_ledger().unreconciled(12)
+    # (h) no unreconciled claims within the recent-round window
+    pending = _buy_ledger().unreconciled(now=int(now))
     if pending:
         return _buy_reject("unreconciled_claim", f"unresolved rounds: {pending}",
                            slug=slug, outcome=outcome)
@@ -1308,7 +1349,8 @@ async def place_btc5m_buy(outcome: str, max_price: str) -> dict:
         rows = ledger.rows_for_day(round_guard.day_of(now))
         resolutions = {}
         for row in rows:
-            if row["status"] == "matched" and row.get("outcome"):
+            # Unknown rows whose round resolved are charged conservatively.
+            if row["status"] in ("matched", "unknown") and row.get("outcome"):
                 resolutions[row["round"]] = await _resolution_winner(row["round"])
         report = round_guard.loss_report(
             rows, resolutions, max_daily_loss=cfg.max_daily_loss,
@@ -1320,10 +1362,12 @@ async def place_btc5m_buy(outcome: str, max_price: str) -> dict:
                    consecutive_losses=report["consecutive_losses"], window_start=start)
         return _buy_reject("loss_limit", ",".join(report["reasons"]), slug=slug, outcome=outcome)
 
+    canonical = "UP" if requested == "yes" else "DOWN"
+
     # execute
     try:
         ledger.reserve(start, cfg.budget_cost, cfg.max_daily_notional, now=int(now), slug=slug,
-                       outcome=outcome.upper(), max_price=str(send_limit), notional=str(cfg.usd))
+                       outcome=canonical, max_price=str(send_limit), notional=str(cfg.usd))
     except safety.ValidationError as exc:
         return _buy_reject("reservation_rejected", str(exc), slug=slug, outcome=outcome)
 
@@ -1335,18 +1379,23 @@ async def place_btc5m_buy(outcome: str, max_price: str) -> dict:
         raise
 
     try:
-        ledger.mark_submitted(start)
         try:
             response = await observability.submit(
-                client.place_market_order, asset_id=ready["assets"]["UP" if requested == "yes" else "DOWN"],
+                client.place_market_order,
+                asset_id=ready["assets"]["UP" if requested == "yes" else "DOWN"],
                 side="BUY", amount=str(cfg.usd), max_price=str(send_limit), order_type="FAK",
-                builder_code=_settings().builder_code or None)
+                builder_code=_settings().builder_code or None,
+                on_sdk_call=lambda: ledger.mark_submitted(start))
+        except observability.AuditUnavailable:
+            # The SDK method was never invoked, so the claim is untouched.
+            ledger.abort(start)
+            raise
         except BaseException:
             ledger.finish(start, None)
             raise
         ledger.finish(start, response)
         status = getattr(response, "status", None) or getattr(response, "code", None) or "unknown"
-        result = {"slug": slug, "outcome": outcome.upper(), "status": str(status)}
+        result = {"slug": slug, "outcome": canonical, "status": str(status)}
         code = getattr(response, "code", None)
         if code:
             result["code"] = str(code)
@@ -1747,6 +1796,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if _LIVE_BUY_REQUESTED and not _AUTONOMOUS_AT_START:
+        raise SystemExit(
+            "POLY_AUTONOMOUS_LIVE_BUY=1 requires POLY_AUTONOMOUS=1: enable the "
+            "autonomous allowlist explicitly instead of exposing every tool."
+        )
     kwargs: dict[str, Any] = {}
     if args.transport != "stdio":
         try:

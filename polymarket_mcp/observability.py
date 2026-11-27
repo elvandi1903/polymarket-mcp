@@ -22,6 +22,10 @@ from .safety import ValidationError
 HEARTBEAT_INTERVAL_S = 10
 
 
+class AuditUnavailable(ValidationError):
+    """Audit refused the operation before the SDK method was invoked."""
+
+
 def _state_dir() -> Path:
     return Path(os.environ.get("POLY_GUARD_STATE_DIR") or "~/.local/state/polymarket-mcp").expanduser()
 
@@ -159,7 +163,7 @@ def decision(outcome: str) -> None:
     ok = call.record("decision", outcome)
     if outcome == "allowed":
         if not ok:
-            raise ValidationError("Guard audit unavailable; live operation refused")
+            raise AuditUnavailable("Guard audit unavailable; live operation refused")
         call.authorized = True
 
 
@@ -187,13 +191,15 @@ def _response_detail(response) -> dict | None:
     return None
 
 
-async def submit(method, *args, **kwargs):
+async def submit(method, *args, on_sdk_call=None, **kwargs):
     call = _call.get()
     if not call.authorized or not call.record("order", "submit_started"):
         if call.authorized:
             decision("audit_unavailable")
-        raise ValidationError("Guard audit unavailable; live operation refused")
+        raise AuditUnavailable("Guard audit unavailable; live operation refused")
     call.submit_started = True
+    if on_sdk_call is not None:
+        on_sdk_call()
     try:
         response = await method(*args, **kwargs)
     except (Exception, asyncio.CancelledError):

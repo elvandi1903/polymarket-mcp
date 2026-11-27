@@ -77,8 +77,8 @@ def test_accepted_buy_sends_fak_without_max_spend(monkeypatch, tmp_path):
     assert kwargs["asset_id"] == "111"
     assert Decimal(kwargs["max_price"]) <= safety.MAX_BUY_PRICE
     assert "max_spend" not in kwargs and "shares" not in kwargs and "min_price" not in kwargs
-    # An accepted FAK response is not proof of a full fill.
-    assert w.ledger.claim(START) == "unknown"
+    # accepted + matched + taking_amount > 0 is a fill of 1.6 shares.
+    assert w.ledger.claim(START) == "matched"
 
 
 def test_tool_not_registered_by_default():
@@ -231,8 +231,11 @@ def test_submit_exception_stays_unknown_and_charged(monkeypatch, tmp_path):
 
 def test_unreconciled_claim_blocks_until_resolved(monkeypatch, tmp_path):
     _env(monkeypatch)
-    _wire(monkeypatch, tmp_path)
-    assert _buy()["status"] == "matched"
+    w = _wire(monkeypatch, tmp_path)
+    w.submit.side_effect = TimeoutError("network")
+    with pytest.raises(TimeoutError):
+        _buy()
+    w.submit.side_effect = None
 
     monkeypatch.setattr(server, "time", NS(time=lambda: START + 340), raising=False)
     assert _buy()["code"] == "unreconciled_claim"

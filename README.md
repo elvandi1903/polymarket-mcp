@@ -256,10 +256,23 @@ is a diagnostic, not an authorisation.
   whenever `max_spend <= total_cost`, which would shrink the signed notional
   below the requested `POLY_BUY_USD`. The budget margin comes from
   `POLY_FEE_BUFFER` instead.
-- **An accepted response is `unknown`, not `matched`.** The pinned SDK does
-  not document whether an accepted FAK response was fully or partially filled.
-  Only an explicit `unmatched` / `not_enough_balance` rejection releases the
-  budget; everything else stays charged until an operator reconciles it.
+- **A `matched` acceptance is recorded as a fill.** `AcceptedOrder` with
+  `status="matched"` and `taking_amount > 0` stores `making_amount`,
+  `taking_amount`, the trade-id count and the derived `making/taking` price.
+  A partial FAK fill therefore records the shares actually received instead of
+  blocking on reconciliation.
+
+### Response classification
+
+| SDK response | Ledger status |
+|---|---|
+| `RejectedOrder` with `unmatched`, `not_enough_balance`, `fak_not_filled`, `fok_not_filled`, `market_not_ready`, `invalid_nonce`, `invalid_expiration`, `post_only_mode`, `post_only_would_cross` | `no_fill` (budget released, round still claimed) |
+| `AcceptedOrder` `matched` and `taking_amount > 0` | `matched` (amounts recorded) |
+| `AcceptedOrder` `live` / `delayed`, `taking_amount = 0`, code `unknown`, or no response | `unknown` (budget stays charged) |
+
+The maker/taker mapping (`making` = USD spent, `taking` = shares) follows the
+SDK's own price derivation (`price = maker / taker` for a BUY) and has not been
+confirmed against a live response yet.
 
 ### Reconciliation
 
@@ -269,21 +282,35 @@ python -m polymarket_mcp.ledger_admin resolve <round> matched|no_fill
 ```
 
 `ledger_admin` is a human CLI, not an MCP tool. `resolve … no_fill` releases
-the reservation; `matched` keeps it charged. Until every claim in the last 12
-rounds is resolved, new BUYs are rejected with `unreconciled_claim`.
-Daily loss is computed conservatively: a loss is charged at the full notional,
-a win is never credited, and unresolved rounds are skipped rather than guessed.
+the reservation; `matched` keeps it charged. A `pending`/`unknown` claim blocks
+new BUYs only while its round is inside the last 12 rounds
+(`round >= current_round − 3600 s`); older unknowns still appear in
+`guard_status.ledger.unknown_rounds` but no longer block.
+
+Daily loss charges the recorded spend (`making`) when present, otherwise the
+full notional; a win is never credited. An unresolved claim whose round has
+resolved is charged as a full loss until reconciled. Resolution lookups are
+cached per process — a resolved winner permanently, a pending round for 60
+seconds — so repeated BUY attempts in one round do not re-hit the network.
 
 The audit log records the machine-readable SDK outcome code and status, plus a
 trade-id count, but **not** the venue's free-text error message: that text is
 remote-controlled and the repository's leak regression forbids it.
 
+### Enabling requirements
+
+`POLY_AUTONOMOUS_LIVE_BUY=1` requires `POLY_AUTONOMOUS=1` at process start;
+otherwise the server refuses to start, so cancellation and credential tools are
+never exposed by a live-BUY flag alone. If `POLY_AUTONOMOUS_TOOLS` is set and
+does not list `place_btc5m_buy`, the BUY tool is not registered.
+
 ### Known limitations
 
 - At `POLY_BUY_USD=1.00` the fill is deliberately small (roughly 1.3–1.6
   shares at 0.62–0.77 per the operator's own web test).
-- FAK may fill partially; the server cannot yet distinguish that from a full
-  fill, so the claim waits for reconciliation.
+- A partial FAK fill is recorded as `matched` with the actual amounts the SDK
+  reports; whether those amounts always mean what the table above assumes is
+  unverified against the venue.
 - The price cap prevents overpaying per share; it does **not** make a trade
   profitable.
 - The platform fee is not verified for BTC 5m markets, so
