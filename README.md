@@ -104,7 +104,15 @@ cp .env.example .env   # then fill on YOUR machine; never commit it
 | `POLY_BUILDER_CODE` | Optional attribution code |
 | `POLY_ALLOW_LIVE` | `1` arms live mode; keep `0` for DRY-RUN |
 | `POLY_MAX_NOTIONAL` | Per-order USD cap (0 = unset) — set this |
-| `POLY_MAX_OPEN_ORDERS` | Open-order cap (0 = unset) |
+| `POLY_AUTONOMOUS_LIVE_BUY` | `1` registers `place_btc5m_buy` at process start; `0` (default) means the tool does not exist |
+| `POLY_BUY_USD` | Fixed FAK BUY notional, default `1.00`; must be a whole number of cents in `[1.00, 5.00]` |
+| `POLY_FEE_BUFFER` | Budget margin above the notional, default `0.10`; a margin, not a fee estimate |
+| `POLY_MAX_DAILY_NOTIONAL` | Required for BUY: positive UTC-day budget |
+| `POLY_MAX_DAILY_LOSS` | Required for BUY: positive UTC-day loss limit that latches HALT |
+| `POLY_MAX_CONSECUTIVE_LOSSES` | Default `3`; latching threshold for consecutive losses |
+| `POLY_MAX_BUY_PRICE` | Optional; may only lower the hard `0.72` cap. A higher value is rejected, not clamped |
+| `POLY_MAX_SLIPPAGE_TICKS` | Default `1`; how far above the live ask `max_price` may sit |
+| `POLY_ENTRY_MIN_S` / `POLY_ENTRY_MAX_S` | Defaults `15` / `90`; seconds after the round opens when a BUY is allowed |
 | `POLY_GUARD_STATE_DIR` | Process environment only. Private local state directory; defaults to `~/.local/state/polymarket-mcp`. Example: `POLY_GUARD_STATE_DIR="$HOME/.local/state/polymarket-agent"`. |
 | `POLY_NONCE` | Derivation nonce if your API key used one |
 
@@ -133,7 +141,6 @@ mcp_servers:
       POLY_WALLET: "${POLY_WALLET}"
       POLY_ALLOW_LIVE: "0"
       POLY_MAX_NOTIONAL: "100"
-      POLY_MAX_OPEN_ORDERS: "5"
 ```
 
 Hmm: `${...}` interpolation in Hermes' YAML — verify it resolves your OS env
@@ -207,6 +214,81 @@ replacements. `POLY_MAX_PTB_AGE_S` is a positive finite number in the process
 environment (default `10`, example `POLY_MAX_PTB_AGE_S=5`). Book receipt age
 uses `POLY_LIVE_FRESH_MS` (default `2000`). A passing result always has
 `live_buy_allowed: false`: no BUY execution or budget reservation is enabled.
+
+## Autonomous BUY (BTC 5m) — opt-in, fail-closed
+
+`place_btc5m_buy(outcome, max_price)` is registered **only** when
+`POLY_AUTONOMOUS_LIVE_BUY=1` is present at process start. The agent passes no
+market, amount, shares or order type; the server derives the running round
+slug, sends a **FAK** market BUY for `POLY_BUY_USD`, and caps the price.
+
+Required BUY variables are read from the **process environment only**, never
+from `.env`: `POLY_MAX_NOTIONAL`, `POLY_MAX_DAILY_NOTIONAL`,
+`POLY_MAX_DAILY_LOSS`. A missing or invalid one rejects the BUY and names the
+variable. `POLY_BUY_USD × (1 + POLY_FEE_BUFFER)` must fit inside
+`POLY_MAX_NOTIONAL`.
+
+Checks run in this order, all before the round claim is reserved, using one
+time snapshot:
+
+1. Live gate: `POLY_ALLOW_LIVE=1`, `POLY_AUTONOMOUS_LIVE_BUY=1`, no `HALT` file.
+2. Required variables valid.
+3. Notional amount and fee-buffer budget inside the caps.
+4. Entry window `POLY_ENTRY_MIN_S … POLY_ENTRY_MAX_S` of the current round.
+5. Shared readiness: PTB captured, fresh TWAP data point, both books fresh,
+   market explicitly accepting orders, account explicitly not closed-only.
+6. `max_price` on the tick grid and at or below the effective cap
+   (`min(0.72, POLY_MAX_BUY_PRICE)`).
+7. Live book for the chosen outcome: ask at or above `0.20`, at or below
+   `max_price`, and `max_price` within `POLY_MAX_SLIPPAGE_TICKS` of the ask.
+8. No unreconciled claim among the last 12 rounds.
+9. Daily-loss and consecutive-loss limits; breaching either writes `HALT`.
+
+The claim is then reserved atomically, the order is submitted once, and the
+result is recorded. `HALT` blocks new BUYs only — never SELL, cancel or reads.
+A passing readiness check always reports `live_buy_allowed: false`; readiness
+is a diagnostic, not an authorisation.
+
+### Decisions backed by SDK evidence
+
+- **No `max_spend` is sent.** In `polymarket-client==0.20.1`,
+  `adjust_buy_amount_for_fees` returns `max_spend / (1 + rate/price + builder)`
+  whenever `max_spend <= total_cost`, which would shrink the signed notional
+  below the requested `POLY_BUY_USD`. The budget margin comes from
+  `POLY_FEE_BUFFER` instead.
+- **An accepted response is `unknown`, not `matched`.** The pinned SDK does
+  not document whether an accepted FAK response was fully or partially filled.
+  Only an explicit `unmatched` / `not_enough_balance` rejection releases the
+  budget; everything else stays charged until an operator reconciles it.
+
+### Reconciliation
+
+```bash
+python -m polymarket_mcp.ledger_admin show
+python -m polymarket_mcp.ledger_admin resolve <round> matched|no_fill
+```
+
+`ledger_admin` is a human CLI, not an MCP tool. `resolve … no_fill` releases
+the reservation; `matched` keeps it charged. Until every claim in the last 12
+rounds is resolved, new BUYs are rejected with `unreconciled_claim`.
+Daily loss is computed conservatively: a loss is charged at the full notional,
+a win is never credited, and unresolved rounds are skipped rather than guessed.
+
+The audit log records the machine-readable SDK outcome code and status, plus a
+trade-id count, but **not** the venue's free-text error message: that text is
+remote-controlled and the repository's leak regression forbids it.
+
+### Known limitations
+
+- At `POLY_BUY_USD=1.00` the fill is deliberately small (roughly 1.3–1.6
+  shares at 0.62–0.77 per the operator's own web test).
+- FAK may fill partially; the server cannot yet distinguish that from a full
+  fill, so the claim waits for reconciliation.
+- The price cap prevents overpaying per share; it does **not** make a trade
+  profitable.
+- The platform fee is not verified for BTC 5m markets, so
+  `POLY_FEE_BUFFER` is a safety margin, not a fee calculation.
+- Nothing here has been exercised against the live trading API.
 
 ## Guard audit and watchdog
 

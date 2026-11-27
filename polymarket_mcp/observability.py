@@ -59,13 +59,16 @@ class GuardState:
         finally:
             os.close(fd)
 
-    def record(self, request_id: str, tool: str, event: str, outcome: str, index: int | None = None) -> bool:
+    def record(self, request_id: str, tool: str, event: str, outcome: str,
+               index: int | None = None, detail: dict | None = None) -> bool:
         row = {
             "timestamp": time.time(), "request_id": request_id, "tool": tool,
             "event": event, "outcome": outcome,
         }
         if index is not None:
             row["index"] = index
+        if detail:
+            row["detail"] = detail
         try:
             self._append(row)
         except (OSError, RuntimeError, ValueError):
@@ -120,8 +123,9 @@ class _AuditCall:
     authorized: bool = False
     submit_started: bool = False
 
-    def record(self, event: str, outcome: str, index: int | None = None) -> bool:
-        return state.record(self.request_id, self.tool, event, outcome, index)
+    def record(self, event: str, outcome: str, index: int | None = None,
+               detail: dict | None = None) -> bool:
+        return state.record(self.request_id, self.tool, event, outcome, index, detail)
 
 
 _call: ContextVar[_AuditCall] = ContextVar("guard_audit_call")
@@ -169,6 +173,20 @@ def _result_outcome(response) -> str:
     return "response_received"
 
 
+def _response_detail(response) -> dict | None:
+    """Machine-readable outcome only.
+
+    The venue's free-text ``message`` is deliberately excluded: it is
+    remote-controlled text that could echo identifiers, and the repo's leak
+    regression forbids it in the audit log.
+    """
+    if isinstance(response, RejectedOrder):
+        return {"code": str(response.code)}
+    if isinstance(response, AcceptedOrder):
+        return {"status": str(response.status), "trade_ids": len(response.trade_ids)}
+    return None
+
+
 async def submit(method, *args, **kwargs):
     call = _call.get()
     if not call.authorized or not call.record("order", "submit_started"):
@@ -183,9 +201,9 @@ async def submit(method, *args, **kwargs):
         raise
     if isinstance(response, (tuple, list)) and response:
         for index, item in enumerate(response):
-            call.record("order", _result_outcome(item), index)
+            call.record("order", _result_outcome(item), index, _response_detail(item))
     else:
-        call.record("order", _result_outcome(response))
+        call.record("order", _result_outcome(response), detail=_response_detail(response))
     return response
 
 

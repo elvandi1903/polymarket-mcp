@@ -154,6 +154,9 @@ _AUTONOMOUS_SAFE_TOOLS = frozenset({
 
 
 _AUTONOMOUS_AT_START = os.getenv("POLY_AUTONOMOUS", "0").strip() != "0"
+_LIVE_BUY_AT_START = os.getenv("POLY_AUTONOMOUS_LIVE_BUY", "0").strip() == "1"
+if _LIVE_BUY_AT_START:
+    _AUTONOMOUS_SAFE_TOOLS = _AUTONOMOUS_SAFE_TOOLS | {"place_btc5m_buy"}
 
 
 def _autonomous() -> bool:
@@ -527,7 +530,12 @@ async def place_market_order(
 @_tool
 async def guard_status() -> dict:
     """Show recent guard decisions and local audit/heartbeat health."""
-    return observability.state.status()
+    from . import halt
+
+    status = observability.state.status()
+    status["halt"] = halt.read()
+    status["live_buy_tool_registered"] = _LIVE_BUY_AT_START
+    return status
 
 
 @_tool
@@ -1094,24 +1102,16 @@ async def check_closed_only_mode() -> dict:
         await client.close()
 
 
-@_tool
-@observability.audit_tool
-async def check_buy_readiness() -> dict:
-    """Check the current BTC 5m BUY prerequisites without authorizing an order."""
+async def _buy_readiness(now: float, max_age: float) -> dict:
+    """Shared prerequisite check. Returns reasons plus per-side book data."""
     from . import live, ptb
     from .resolution import window_bounds
 
-    start, _, slug = window_bounds(int(time.time()) // 300 * 300)
+    start, _, slug = window_bounds(int(now) // 300 * 300)
     reasons: list[str] = []
-    try:
-        max_age = float(os.getenv("POLY_MAX_PTB_AGE_S", "10"))
-        if not math.isfinite(max_age) or max_age <= 0:
-            raise ValueError
-    except ValueError:
-        reasons.append("invalid_POLY_MAX_PTB_AGE_S")
-        max_age = None
-
     assets: dict[str, str] = {}
+    books: dict[str, dict] = {}
+
     try:
         pub = clientmod.build_public_client()
         try:
@@ -1142,19 +1142,17 @@ async def check_buy_readiness() -> dict:
     except Exception:
         reasons.append("closed_only_unverified")
 
-    now = time.time()
-    if int(now) // 300 * 300 != start:
-        observability.decision("readiness_blocked")
-        return {"window_start": start, "prerequisites_met": False,
-                "reasons": ["round_changed"], "live_buy_allowed": False}
+    if int(now) // 300 * 300 != start or int(time.time()) // 300 * 300 != start:
+        return {"window_start": start, "slug": slug, "reasons": ["round_changed"],
+                "assets": assets, "books": books}
+
     feed = ptb._FEED
     record = feed.captured(start) if feed is not None else None
-    if record is None or record.status != "captured" or record.ptb is None or not record.ptb.is_finite() or record.ptb <= 0:
+    if (record is None or record.status != "captured" or record.ptb is None
+            or not record.ptb.is_finite() or record.ptb <= 0):
         reasons.append("ptb_not_captured")
-    elif max_age is not None and (
-        not feed._running or feed.auth_failed or feed.last_twap_at < start
-        or not 0 <= now - feed.last_twap_at <= max_age
-    ):
+    elif (not feed._running or feed.auth_failed or feed.last_twap_at < start
+          or not 0 <= now - feed.last_twap_at <= max_age):
         reasons.append("ptb_stale")
 
     manager = live.get_manager()
@@ -1163,12 +1161,203 @@ async def check_buy_readiness() -> dict:
         stream = manager.get_state(asset_id)
         if stream is None or not stream.book or not stream.book.get("asks"):
             reasons.append(f"book_{side}_missing")
-        elif not stream.book_received_at_ms or not 0 <= stream.book_age_ms(now_ms) <= manager.cfg["fresh_ms"]:
+        elif (not stream.book_received_at_ms
+              or not 0 <= stream.book_age_ms(now_ms) <= manager.cfg["fresh_ms"]):
             reasons.append(f"book_{side}_stale")
+        else:
+            try:
+                ask = min(decimal.Decimal(str(row["price"])) for row in stream.book["asks"])
+                tick = decimal.Decimal(str(stream.book.get("tick_size") or 0))
+            except (KeyError, TypeError, decimal.InvalidOperation, ValueError):
+                reasons.append(f"book_{side}_invalid")
+                continue
+            books[side] = {"best_ask": ask, "tick_size": tick}
 
+    return {"window_start": start, "slug": slug, "reasons": reasons,
+            "assets": assets, "books": books}
+
+
+@_tool
+@observability.audit_tool
+async def check_buy_readiness() -> dict:
+    """Check the current BTC 5m BUY prerequisites without authorizing an order."""
+    from .resolution import window_bounds
+
+    start, _, _ = window_bounds(int(time.time()) // 300 * 300)
+    try:
+        max_age = float(os.getenv("POLY_MAX_PTB_AGE_S", "10"))
+        if not math.isfinite(max_age) or max_age <= 0:
+            raise ValueError
+    except ValueError:
+        observability.decision("readiness_blocked")
+        return {"window_start": start, "prerequisites_met": False,
+                "reasons": ["invalid_POLY_MAX_PTB_AGE_S"], "live_buy_allowed": False}
+    snapshot = await _buy_readiness(time.time(), max_age)
+    reasons = snapshot["reasons"]
     observability.decision("readiness_blocked" if reasons else "readiness_met_live_buy_disabled")
-    return {"window_start": start, "prerequisites_met": not reasons,
+    return {"window_start": snapshot["window_start"], "prerequisites_met": not reasons,
             "reasons": reasons, "live_buy_allowed": False}
+
+
+def _buy_ledger():
+    from .round_guard import BuyLedger
+
+    return BuyLedger(observability._state_dir() / "buy-ledger.sqlite3")
+
+
+def _buy_reject(code: str, message: str, *, slug: str, outcome: str) -> dict:
+    observability.decision(code)
+    return {"slug": slug, "outcome": outcome, "status": "rejected",
+            "code": code, "message": message}
+
+
+async def _resolution_winner(window_start: int) -> str | None:
+    from .resolution import get_btc5m_resolution
+
+    payload = await get_btc5m_resolution(window_start)
+    if payload.get("state") != "resolved":
+        return None
+    winner = (payload.get("winner") or "").upper()
+    return winner or None
+
+
+@observability.audit_tool
+async def place_btc5m_buy(outcome: str, max_price: str) -> dict:
+    """Autonomous BTC 5m FAK BUY. Not registered unless explicitly enabled."""
+    from . import buy_config, halt, round_guard
+
+    now = time.time()
+    start = int(now) // 300 * 300
+    slug = f"btc-updown-5m-{start}"
+    try:
+        requested = safety.validate_outcome(outcome)
+    except safety.ValidationError as exc:
+        return _buy_reject("invalid_outcome", str(exc), slug=slug, outcome=str(outcome))
+
+    # (a) gate
+    if not _settings().allow_live:
+        return _buy_reject("live_disabled", "POLY_ALLOW_LIVE must be 1", slug=slug, outcome=outcome)
+    if not _LIVE_BUY_AT_START:
+        return _buy_reject("not_enabled", "POLY_AUTONOMOUS_LIVE_BUY is not 1 at process start",
+                           slug=slug, outcome=outcome)
+    latched = halt.read()
+    if latched is not None:
+        return _buy_reject("halted", f"HALT: {latched.get('reason')}", slug=slug, outcome=outcome)
+
+    # (b) + (c) required limits and amount
+    try:
+        cfg = buy_config.load()
+    except safety.ValidationError as exc:
+        return _buy_reject("invalid_config", str(exc), slug=slug, outcome=outcome)
+
+    # (d) entry window
+    elapsed = now - start
+    if not cfg.entry_min_s <= elapsed <= cfg.entry_max_s:
+        return _buy_reject("outside_entry_window",
+                           f"elapsed {elapsed:.1f}s outside [{cfg.entry_min_s}, {cfg.entry_max_s}]",
+                           slug=slug, outcome=outcome)
+
+    # (e) prerequisites
+    ready = await _buy_readiness(now, cfg.max_ptb_age_s)
+    if ready["reasons"]:
+        return _buy_reject("prerequisite_failed", ",".join(ready["reasons"]),
+                           slug=slug, outcome=outcome)
+
+    # (f) requested price vs cap and tick
+    try:
+        limit = safety.to_decimal(max_price, "max_price")
+    except safety.ValidationError as exc:
+        return _buy_reject("invalid_max_price", str(exc), slug=slug, outcome=outcome)
+    if limit > cfg.price_cap:
+        return _buy_reject("price_above_cap", f"max_price {limit} exceeds cap {cfg.price_cap}",
+                           slug=slug, outcome=outcome)
+
+    # (g) live book for the chosen outcome
+    book = ready["books"].get("UP" if requested == "yes" else "DOWN")
+    if book is None:
+        return _buy_reject("book_missing", "no fresh book for the requested outcome",
+                           slug=slug, outcome=outcome)
+    ask, tick = book["best_ask"], book["tick_size"]
+    if tick <= 0:
+        return _buy_reject("invalid_tick", "tick size unavailable", slug=slug, outcome=outcome)
+    if limit % tick != 0:
+        return _buy_reject("price_off_tick", f"max_price {limit} is not a multiple of {tick}",
+                           slug=slug, outcome=outcome)
+    if ask < safety.MIN_BUY_ASK:
+        return _buy_reject("ask_below_floor", f"best ask {ask} below {safety.MIN_BUY_ASK}",
+                           slug=slug, outcome=outcome)
+    if ask > limit:
+        return _buy_reject("ask_above_limit", f"best ask {ask} above max_price {limit}",
+                           slug=slug, outcome=outcome)
+    ceiling = ask + tick * cfg.max_slippage_ticks
+    if limit > ceiling:
+        return _buy_reject("slippage_exceeded",
+                           f"max_price {limit} exceeds ask {ask} + {cfg.max_slippage_ticks} tick(s)",
+                           slug=slug, outcome=outcome)
+    send_limit = min(limit, ceiling)
+
+    # (h) no unreconciled claims
+    pending = _buy_ledger().unreconciled(12)
+    if pending:
+        return _buy_reject("unreconciled_claim", f"unresolved rounds: {pending}",
+                           slug=slug, outcome=outcome)
+
+    # (i) loss limits
+    try:
+        ledger = _buy_ledger()
+        rows = ledger.rows_for_day(round_guard.day_of(now))
+        resolutions = {}
+        for row in rows:
+            if row["status"] == "matched" and row.get("outcome"):
+                resolutions[row["round"]] = await _resolution_winner(row["round"])
+        report = round_guard.loss_report(
+            rows, resolutions, max_daily_loss=cfg.max_daily_loss,
+            max_consecutive_losses=cfg.max_consecutive_losses)
+    except Exception as exc:
+        return _buy_reject("loss_check_failed", type(exc).__name__, slug=slug, outcome=outcome)
+    if report["reasons"]:
+        halt.write(report["reasons"][0], daily_loss_usd=report["daily_loss_usd"],
+                   consecutive_losses=report["consecutive_losses"], window_start=start)
+        return _buy_reject("loss_limit", ",".join(report["reasons"]), slug=slug, outcome=outcome)
+
+    # execute
+    try:
+        ledger.reserve(start, cfg.budget_cost, cfg.max_daily_notional, now=int(now), slug=slug,
+                       outcome=outcome.upper(), max_price=str(send_limit), notional=str(cfg.usd))
+    except safety.ValidationError as exc:
+        return _buy_reject("reservation_rejected", str(exc), slug=slug, outcome=outcome)
+
+    try:
+        observability.decision("allowed")
+        client = await clientmod.build_secure_client(_settings())
+    except BaseException:
+        ledger.abort(start)
+        raise
+
+    try:
+        ledger.mark_submitted(start)
+        try:
+            response = await observability.submit(
+                client.place_market_order, asset_id=ready["assets"]["UP" if requested == "yes" else "DOWN"],
+                side="BUY", amount=str(cfg.usd), max_price=str(send_limit), order_type="FAK",
+                builder_code=_settings().builder_code or None)
+        except BaseException:
+            ledger.finish(start, None)
+            raise
+        ledger.finish(start, response)
+        status = getattr(response, "status", None) or getattr(response, "code", None) or "unknown"
+        result = {"slug": slug, "outcome": outcome.upper(), "status": str(status)}
+        code = getattr(response, "code", None)
+        if code:
+            result["code"] = str(code)
+            result["message"] = str(getattr(response, "message", ""))[:200]
+        return result
+    finally:
+        await client.close()
+
+
+if _LIVE_BUY_AT_START:
+    mcp.tool()(place_btc5m_buy)
 
 
 # ----------------------------------------------------------------- PTB FEED --
